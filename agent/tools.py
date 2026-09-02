@@ -34,7 +34,8 @@ OPERADOR_OTRO = os.getenv("OPERADOR_OTRO", "")
 
 _ZERNIO_API_KEY = os.getenv("ZERNIO_API_KEY", "")
 _ZERNIO_ACCOUNT_ID = os.getenv("ZERNIO_ACCOUNT_ID", "")
-_ZERNIO_BASE_URL = (os.getenv("ZERNIO_BASE_URL") or "https://zernio.com/api/v1").rstrip("/")
+# Base real de la API de Zernio: los endpoints van despues como /v1/...
+_ZERNIO_BASE_URL = (os.getenv("ZERNIO_BASE_URL") or "https://zernio.com/api").rstrip("/")
 
 
 def operador_para(categoria: str) -> str:
@@ -46,15 +47,13 @@ async def notificar_operador(operador: str, telefono_cliente: str, mensaje_clien
     """
     Le manda al operador humano un mensaje de WhatsApp avisando de la conversacion derivada.
 
-    OJO — limite real de WhatsApp: para que esto le llegue al operador, el operador tiene
-    que haberle escrito antes al numero principal del bot (ventana de 24hs abierta), o hay
-    que usar un template aprobado por Meta. Sin eso, Zernio va a devolver un error de envio.
-    La forma mas simple: que cada operador le mande un "hola" al numero del bot una vez.
+    Usa POST /v1/inbox/conversations ("Create conversation") de Zernio: crea la conversacion
+    si no existe, o reusa la que ya haya (por eso funciona si el operador le escribio antes
+    al bot para abrir la ventana de 24hs).
 
-    NOTA: el endpoint exacto para iniciar conversacion con un numero (no un conversation_id
-    existente) hay que confirmarlo contra el dashboard/docs de tu cuenta Zernio — este es el
-    patron mas comun de su API, pero puede variar. Probalo con un mensaje de prueba antes de
-    ponerlo en producción.
+    OJO — limite real de WhatsApp: si el operador NUNCA le escribio al numero del bot, Zernio
+    va a rechazar este envio a menos que se mande un template aprobado por Meta (parametro
+    templateName). Con la ventana de 24hs abierta, el "message" de texto libre alcanza.
     """
     if not _ZERNIO_API_KEY or not operador:
         logger.error("No se puede notificar al operador: falta ZERNIO_API_KEY u operador")
@@ -66,12 +65,12 @@ async def notificar_operador(operador: str, telefono_cliente: str, mensaje_clien
         f"Mensaje: {mensaje_cliente}"
     )
 
-    url = f"{_ZERNIO_BASE_URL}/whatsapp/messages"
+    url = f"{_ZERNIO_BASE_URL}/v1/inbox/conversations"
     headers = {
         "Authorization": f"Bearer {_ZERNIO_API_KEY}",
         "Content-Type": "application/json",
     }
-    payload = {"accountId": _ZERNIO_ACCOUNT_ID, "to": operador, "message": texto}
+    payload = {"accountId": _ZERNIO_ACCOUNT_ID, "participantId": operador, "message": texto}
 
     try:
         async with httpx.AsyncClient(timeout=30.0) as cliente:
@@ -81,6 +80,7 @@ async def notificar_operador(operador: str, telefono_cliente: str, mensaje_clien
         return False
 
     if r.status_code == 200:
+        logger.info(f"Zernio acepto la notificacion al operador. Respuesta: {r.text[:300]}")
         return True
 
     logger.error(f"Zernio rechazo la notificacion al operador [{r.status_code}]: {r.text[:300]}")
