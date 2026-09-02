@@ -49,11 +49,12 @@ async def notificar_operador(operador: str, telefono_cliente: str, mensaje_clien
 
     Usa POST /v1/inbox/conversations ("Create conversation") de Zernio: crea la conversacion
     si no existe, o reusa la que ya haya (por eso funciona si el operador le escribio antes
-    al bot para abrir la ventana de 24hs).
+    al bot para abrir la ventana de 24hs). Se manda con category="utility" (WhatsApp Direct
+    Send) para que Zernio no exija un template aprobado por Meta.
 
-    OJO — limite real de WhatsApp: si el operador NUNCA le escribio al numero del bot, Zernio
-    va a rechazar este envio a menos que se mande un template aprobado por Meta (parametro
-    templateName). Con la ventana de 24hs abierta, el "message" de texto libre alcanza.
+    OJO: category="utility" solo funciona en cuentas de WhatsApp "eligible" segun Meta —
+    generalmente requiere haber pasado la verificacion de negocio. Si tu cuenta todavia no
+    esta verificada, este envio puede seguir rechazandose hasta que se apruebe.
     """
     if not _ZERNIO_API_KEY or not operador:
         logger.error("No se puede notificar al operador: falta ZERNIO_API_KEY u operador")
@@ -70,7 +71,12 @@ async def notificar_operador(operador: str, telefono_cliente: str, mensaje_clien
         "Authorization": f"Bearer {_ZERNIO_API_KEY}",
         "Content-Type": "application/json",
     }
-    payload = {"accountId": _ZERNIO_ACCOUNT_ID, "participantId": operador, "message": texto}
+    payload = {
+        "accountId": _ZERNIO_ACCOUNT_ID,
+        "participantId": operador,
+        "message": texto,
+        "category": "utility",
+    }
 
     try:
         async with httpx.AsyncClient(timeout=30.0) as cliente:
