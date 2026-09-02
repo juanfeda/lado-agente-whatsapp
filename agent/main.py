@@ -16,7 +16,7 @@ from dotenv import load_dotenv
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Request
 from fastapi.responses import PlainTextResponse
 
-from agent.brain import clasificar_intencion, obtener_mensaje_error
+from agent.brain import clasificar_intencion, generar_respuesta, obtener_mensaje_error
 from agent.memory import (
     guardar_mensaje,
     inicializar_db,
@@ -25,6 +25,7 @@ from agent.memory import (
     marcar_derivado,
     marcar_evento_procesado,
     obtener_derivacion,
+    obtener_historial,
 )
 from agent.providers import obtener_proveedor
 from agent.providers.base import MensajeEntrante
@@ -46,6 +47,12 @@ logger = logging.getLogger("agentkit")
 logger.setLevel(logging.DEBUG if ENVIRONMENT == "development" else logging.INFO)
 
 PORT = int(os.getenv("PORT", "8000"))
+
+# Interruptor temporal: mientras el template de WhatsApp no este aprobado, las
+# notificaciones a operadores fallan. En "false", el bot responde con la IA normal
+# (FAQ, leads, soporte) en vez de derivar todo de una. Cambialo a "true" (o borralo,
+# es el default) cuando el template ya este aprobado y las notificaciones funcionen.
+DERIVAR_AUTOMATICAMENTE = (os.getenv("DERIVAR_AUTOMATICAMENTE") or "true").strip().lower() == "true"
 
 # Un candado por numero de telefono. En WhatsApp es normal que alguien mande "hola" y
 # medio segundo despues la pregunta de verdad: sin esto los dos mensajes se procesarian
@@ -208,15 +215,23 @@ async def procesar_mensaje(msg: MensajeEntrante):
                 return
 
             # Primera vez que este cliente escribe (o volvio a escribir sin estar
-            # derivado): clasificamos y derivamos de una, no generamos respuesta de IA.
-            categoria = await clasificar_intencion(msg.texto)
-            operador = operador_para(categoria)
+            # derivado).
+            if not DERIVAR_AUTOMATICAMENTE:
+                # Modo FAQ normal: la IA responde de verdad usando el system prompt
+                # (informacion de la inmobiliaria, tono, casos de uso).
+                historial = await obtener_historial(msg.telefono)
+                respuesta, es_respuesta_real = await generar_respuesta(msg.texto, historial)
+            else:
+                # Modo derivacion: clasificamos y derivamos de una, no generamos
+                # respuesta de IA.
+                categoria = await clasificar_intencion(msg.texto)
+                operador = operador_para(categoria)
 
-            await marcar_derivado(msg.telefono, categoria, operador)
-            await notificar_operador(operador, msg.telefono, msg.texto)
+                await marcar_derivado(msg.telefono, categoria, operador)
+                await notificar_operador(operador, msg.telefono, msg.texto)
 
-            respuesta = MENSAJE_DERIVACION[categoria]
-            es_respuesta_real = False  # es un aviso fijo, no una respuesta conversacional
+                respuesta = MENSAJE_DERIVACION[categoria]
+                es_respuesta_real = False  # es un aviso fijo, no una respuesta conversacional
 
             enviado = await proveedor.enviar_mensaje(msg.telefono, respuesta, msg.contexto)
 

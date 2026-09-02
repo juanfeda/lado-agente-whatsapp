@@ -36,6 +36,60 @@ _ZERNIO_API_KEY = os.getenv("ZERNIO_API_KEY", "")
 _ZERNIO_ACCOUNT_ID = os.getenv("ZERNIO_ACCOUNT_ID", "")
 # Base real de la API de Zernio: los endpoints van despues como /v1/...
 _ZERNIO_BASE_URL = (os.getenv("ZERNIO_BASE_URL") or "https://zernio.com/api").rstrip("/")
+# Nombre del template aprobado por Meta para notificar a los operadores. Sin esto,
+# Zernio va a rechazar el envio salvo que tu cuenta tenga Direct Send habilitado.
+_ZERNIO_TEMPLATE_NOTIFICACION = os.getenv("ZERNIO_TEMPLATE_NOTIFICACION", "")
+_ZERNIO_TEMPLATE_IDIOMA = os.getenv("ZERNIO_TEMPLATE_IDIOMA") or "es"
+
+# ── Busqueda de propiedades en la web de Lado ────────────────
+_LADOWEB_API_URL = os.getenv("LADOWEB_API_URL", "")
+_LADOWEB_API_KEY = os.getenv("LADOWEB_API_KEY", "")
+
+
+async def buscar_propiedades(
+    operation: str = "",
+    type: str = "",
+    zone: str = "",
+    min_price: float | None = None,
+    max_price: float | None = None,
+    rooms: int | None = None,
+) -> dict:
+    """
+    Busca propiedades activas en ladoinmobiliaria.com.ar via propiedades_api.php.
+
+    Cualquier parametro vacio/None no se manda (no filtra por esa columna).
+    """
+    if not _LADOWEB_API_URL or not _LADOWEB_API_KEY:
+        return {"error": "La busqueda de propiedades no esta configurada (falta LADOWEB_API_URL o LADOWEB_API_KEY)"}
+
+    params = {}
+    if operation:
+        params["operation"] = operation
+    if type:
+        params["type"] = type
+    if zone:
+        params["zone"] = zone
+    if min_price is not None:
+        params["min_price"] = min_price
+    if max_price is not None:
+        params["max_price"] = max_price
+    if rooms is not None:
+        params["rooms"] = rooms
+
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as cliente:
+            r = await cliente.get(
+                _LADOWEB_API_URL, params=params, headers={"X-Api-Key": _LADOWEB_API_KEY}
+            )
+    except httpx.HTTPError as e:
+        logger.error(f"Error buscando propiedades: {e}")
+        return {"error": "No se pudo conectar con el buscador de propiedades"}
+
+    if r.status_code != 200:
+        logger.error(f"propiedades_api.php respondio {r.status_code}: {r.text[:200]}")
+        return {"error": "El buscador de propiedades respondio con un error"}
+
+    return r.json()
 
 
 def operador_para(categoria: str) -> str:
@@ -71,12 +125,18 @@ async def notificar_operador(operador: str, telefono_cliente: str, mensaje_clien
         "Authorization": f"Bearer {_ZERNIO_API_KEY}",
         "Content-Type": "application/json",
     }
-    payload = {
-        "accountId": _ZERNIO_ACCOUNT_ID,
-        "participantId": operador,
-        "message": texto,
-        "category": "utility",
-    }
+    payload = {"accountId": _ZERNIO_ACCOUNT_ID, "participantId": operador}
+
+    if _ZERNIO_TEMPLATE_NOTIFICACION:
+        # Camino confiable: template aprobado por Meta. No depende de Direct Send
+        # ni de que el operador te haya escrito antes.
+        payload["templateName"] = _ZERNIO_TEMPLATE_NOTIFICACION
+        payload["templateLanguage"] = _ZERNIO_TEMPLATE_IDIOMA
+        payload["templateParams"] = [telefono_cliente, mensaje_cliente]
+    else:
+        # Fallback: solo funciona si tu cuenta tiene Direct Send habilitado por Meta.
+        payload["message"] = texto
+        payload["category"] = "utility"
 
     try:
         async with httpx.AsyncClient(timeout=30.0) as cliente:

@@ -13,6 +13,8 @@ import yaml
 from anthropic import AsyncAnthropic
 from dotenv import load_dotenv
 
+from agent.tools import buscar_propiedades
+
 load_dotenv()
 logger = logging.getLogger("agentkit")
 
@@ -38,6 +40,56 @@ MAX_TOKENS = int(os.getenv("ANTHROPIC_MAX_TOKENS") or "4096")
 # Los modelos mas viejos no aceptan output_config. Si la primera llamada falla por eso,
 # se reintenta sin el parametro y se recuerda para las siguientes.
 _soporta_esfuerzo = True
+
+# Tool que Claude puede llamar para buscar propiedades reales en ladoinmobiliaria.com.ar.
+# Los tipos y zonas quedan libres (no un enum cerrado) porque no conocemos de antemano
+# todos los valores que carga el equipo en la base.
+HERRAMIENTAS = [
+    {
+        "name": "buscar_propiedades",
+        "description": (
+            "Busca propiedades activas y publicadas en ladoinmobiliaria.com.ar. Usala "
+            "cuando el cliente pregunte por propiedades disponibles, precios, zonas, "
+            "o quiera ver opciones concretas para comprar o alquilar. No inventes "
+            "propiedades ni precios: si no tenes datos, usa esta herramienta."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "operation": {
+                    "type": "string",
+                    "enum": ["venta", "alquiler"],
+                    "description": "Tipo de operacion que busca el cliente",
+                },
+                "type": {
+                    "type": "string",
+                    "description": "Tipo de propiedad, ej: casa, departamento, terreno, local",
+                },
+                "zone": {
+                    "type": "string",
+                    "description": "Zona o barrio, ej: Ensenada, Punta Lara, La Plata",
+                },
+                "min_price": {"type": "number", "description": "Precio minimo en la moneda de la propiedad"},
+                "max_price": {"type": "number", "description": "Precio maximo en la moneda de la propiedad"},
+                "rooms": {"type": "integer", "description": "Cantidad minima de ambientes"},
+            },
+        },
+    }
+]
+
+
+async def _ejecutar_tool(nombre: str, entrada: dict) -> dict:
+    """Despacha una llamada a herramienta hecha por Claude a la funcion real."""
+    if nombre == "buscar_propiedades":
+        return await buscar_propiedades(
+            operation=entrada.get("operation", ""),
+            type=entrada.get("type", ""),
+            zone=entrada.get("zone", ""),
+            min_price=entrada.get("min_price"),
+            max_price=entrada.get("max_price"),
+            rooms=entrada.get("rooms"),
+        )
+    return {"error": f"Herramienta desconocida: {nombre}"}
 
 
 def cargar_config_prompts() -> dict:
@@ -164,6 +216,7 @@ async def generar_respuesta(mensaje: str, historial: list[dict]) -> tuple[str, b
             max_tokens=MAX_TOKENS,
             system=system_prompt,
             messages=mensajes,
+            tools=HERRAMIENTAS,
             **parametros_extra,
         )
 
@@ -182,6 +235,36 @@ async def generar_respuesta(mensaje: str, historial: list[dict]) -> tuple[str, b
                 return obtener_mensaje_error(), False
         else:
             logger.error(f"Error llamando a Claude: {e}")
+            return obtener_mensaje_error(), False
+
+    # Loop de tool use: mientras Claude pida usar una herramienta, la ejecutamos y le
+    # devolvemos el resultado, hasta un maximo de vueltas para no colgar la respuesta
+    # de WhatsApp si algo entra en bucle.
+    vueltas = 0
+    while getattr(respuesta, "stop_reason", None) == "tool_use" and vueltas < 4:
+        vueltas += 1
+        mensajes.append({"role": "assistant", "content": respuesta.content})
+
+        resultados_tools = []
+        for bloque in respuesta.content:
+            if bloque.type != "tool_use":
+                continue
+            logger.info(f"Claude llamo a la herramienta {bloque.name} con {bloque.input}")
+            resultado = await _ejecutar_tool(bloque.name, bloque.input)
+            resultados_tools.append(
+                {
+                    "type": "tool_result",
+                    "tool_use_id": bloque.id,
+                    "content": str(resultado),
+                }
+            )
+        mensajes.append({"role": "user", "content": resultados_tools})
+
+        parametros_extra = {"output_config": {"effort": ESFUERZO}} if (_soporta_esfuerzo and ESFUERZO) else {}
+        try:
+            respuesta = await _llamar(parametros_extra)
+        except Exception as e:  # noqa: BLE001
+            logger.error(f"Error llamando a Claude durante el tool use: {e}")
             return obtener_mensaje_error(), False
 
     if getattr(respuesta, "stop_reason", None) == "max_tokens":
