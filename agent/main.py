@@ -28,7 +28,7 @@ from agent.memory import (
 )
 from agent.providers import obtener_proveedor
 from agent.providers.base import MensajeEntrante
-from agent.tools import notificar_operador, operador_para
+from agent.tools import OPERADOR_ALQUILERES, OPERADOR_OTRO, notificar_operador, operador_para
 
 load_dotenv()
 
@@ -56,7 +56,6 @@ _candados: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
 # en vez de reventar en el import y dejar a Railway reiniciando el contenedor a ciegas.
 proveedor = None
 error_configuracion: str | None = None
-logging.warning(f"Variables de entorno presentes: {sorted(os.environ.keys())}")
 try:
     proveedor = obtener_proveedor()
 except Exception as e:  # noqa: BLE001 — cualquier problema de configuracion
@@ -152,6 +151,12 @@ async def webhook_handler(request: Request, tareas: BackgroundTasks):
     encolados = 0
     for msg in mensajes:
         if msg.es_propio or not msg.texto.strip():
+            continue
+
+        # Los mensajes de los propios operadores (ej: el "hola" para abrir la ventana
+        # de 24hs) no son consultas de clientes: se ignoran para que no se autoderiven.
+        if msg.telefono in (OPERADOR_ALQUILERES, OPERADOR_OTRO):
+            logger.info(f"Mensaje de un operador ({msg.telefono}): se ignora, no es un cliente")
             continue
 
         # La entrega es "al menos una vez": el mismo evento puede llegar dos veces

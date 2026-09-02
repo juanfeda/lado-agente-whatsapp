@@ -39,10 +39,6 @@ if DATABASE_URL.startswith("sqlite") and os.getenv("ENVIRONMENT") == "production
         "Agrega PostgreSQL y configura DATABASE_URL para que el agente recuerde a sus clientes."
     )
 
-logger.warning(
-    f"DATABASE_URL: longitud={len(DATABASE_URL)} empieza_con={DATABASE_URL[:20]!r}"
-)
-
 engine = create_async_engine(DATABASE_URL, echo=False, pool_pre_ping=True)
 async_session = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 
