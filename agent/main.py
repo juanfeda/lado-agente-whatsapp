@@ -18,6 +18,7 @@ from fastapi.responses import PlainTextResponse
 
 from agent.brain import clasificar_intencion, generar_respuesta, obtener_mensaje_error
 from agent.memory import (
+    desmarcar_derivado,
     guardar_mensaje,
     inicializar_db,
     liberar_evento,
@@ -94,6 +95,28 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="AgentKit — WhatsApp AI Agent", version="2.0.0", lifespan=lifespan)
+
+# Clave para el endpoint de administracion (/admin/desmarcar). Poné un valor propio
+# en el .env; sin ADMIN_KEY configurada, el endpoint queda deshabilitado por seguridad.
+_ADMIN_KEY = os.getenv("ADMIN_KEY", "")
+
+
+@app.post("/admin/desmarcar")
+async def admin_desmarcar(telefono: str, key: str):
+    """
+    Reactiva al agente para un cliente que ya estaba derivado (por ejemplo, cuando un
+    operador termino de atenderlo, o para reiniciar una prueba).
+
+    Uso: POST https://tu-dominio/admin/desmarcar?telefono=5491122334455&key=TU_ADMIN_KEY
+    """
+    if not _ADMIN_KEY:
+        raise HTTPException(status_code=503, detail="ADMIN_KEY no configurada")
+    if key != _ADMIN_KEY:
+        raise HTTPException(status_code=401, detail="Clave incorrecta")
+
+    await desmarcar_derivado(telefono)
+    logger.info(f"Desmarcado manualmente: {telefono}")
+    return {"status": "ok", "telefono": telefono}
 
 
 @app.get("/")
