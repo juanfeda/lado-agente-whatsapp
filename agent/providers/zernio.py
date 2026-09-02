@@ -204,3 +204,40 @@ class ProveedorZernio(ProveedorWhatsApp):
             f"Numero {telefono.get('display_phone_number', '?')} conectado "
             f"(calidad: {telefono.get('quality_rating', '?')})"
         )
+
+    async def conversacion_iniciada_por_negocio(self, conversation_id: str) -> bool:
+        """
+        True si el primer mensaje de esta conversacion lo mandaste VOS (por la app de
+        WhatsApp Business, no por el bot), no el cliente.
+
+        Se usa para que el bot no interfiera en conversaciones que ya arranco un humano:
+        si el cliente jamas escribio primero, no es una consulta que el bot deba atender.
+
+        NOTA: pide la conversacion completa ordenada por fecha y mira el primer mensaje.
+        Confirmar el endpoint exacto contra tu cuenta si Zernio lo cambia de nombre.
+        """
+        if not self.api_key or not conversation_id:
+            return False  # sin como confirmarlo, se asume que no (el bot atiende normal)
+
+        url = f"{self.base_url}/inbox/conversations/{conversation_id}/messages"
+        try:
+            async with httpx.AsyncClient(timeout=15.0) as cliente:
+                r = await cliente.get(
+                    url,
+                    params={"order": "asc", "limit": 1},
+                    headers={"Authorization": f"Bearer {self.api_key}"},
+                )
+        except httpx.HTTPError as e:
+            logger.warning(f"No se pudo chequear el origen de la conversacion: {e}")
+            return False
+
+        if r.status_code != 200:
+            logger.warning(f"Zernio respondio {r.status_code} chequeando la conversacion")
+            return False
+
+        mensajes = r.json().get("data") or r.json().get("messages") or []
+        if not mensajes:
+            return False
+
+        primer_mensaje = mensajes[0]
+        return primer_mensaje.get("direction") == "outgoing"

@@ -198,6 +198,15 @@ async def procesar_mensaje(msg: MensajeEntrante):
                 logger.info(f"Mensaje de {msg.telefono} reenviado al operador (sin respuesta de IA)")
                 return
 
+            # Si vos (u otro humano) ya le escribiste primero a este cliente por la app
+            # de WhatsApp Business, el bot no se mete: lo marca como derivado en silencio
+            # (sin mandarle ningun mensaje) y listo, queda en manos humanas.
+            conversation_id = msg.contexto.get("conversation_id", "")
+            if conversation_id and await proveedor.conversacion_iniciada_por_negocio(conversation_id):
+                await marcar_derivado(msg.telefono, "otro", operador_para("otro"))
+                logger.info(f"Conversacion con {msg.telefono} la inicio el negocio: el bot no responde")
+                return
+
             # Primera vez que este cliente escribe (o volvio a escribir sin estar
             # derivado): clasificamos y derivamos de una, no generamos respuesta de IA.
             categoria = await clasificar_intencion(msg.texto)
