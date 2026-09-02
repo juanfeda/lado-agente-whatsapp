@@ -56,9 +56,8 @@ _candados: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
 # en vez de reventar en el import y dejar a Railway reiniciando el contenedor a ciegas.
 proveedor = None
 error_configuracion: str | None = None
+logging.warning(f"Variables de entorno presentes: {sorted(os.environ.keys())}")
 try:
-
-    proveedor = None error_configuracion: str | None = None logging.warning(f"Variables de entorno presentes: {sorted(os.environ.keys())}") try: proveedor = obtener_proveedor() except Exception as e: # noqa: BLE001 error_configuracion = str(e) Esto solo muestra los NOMBRES de las variables, nunca sus valores
     proveedor = obtener_proveedor()
 except Exception as e:  # noqa: BLE001 — cualquier problema de configuracion
     error_configuracion = str(e)
