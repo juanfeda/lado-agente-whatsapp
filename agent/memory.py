@@ -168,6 +168,22 @@ async def desmarcar_derivado(telefono: str):
         await session.commit()
 
 
+async def mensajes_recientes_de(telefono: str, segundos: int) -> int:
+    """
+    Cuenta cuantos mensajes del CLIENTE (role='user') llegaron de este numero en los
+    ultimos N segundos. Se usa para detectar ritmo imposible para un humano tipeando
+    (loops contra otro bot).
+    """
+    limite = ahora() - timedelta(seconds=segundos)
+    async with async_session() as session:
+        resultado = await session.execute(
+            select(Mensaje).where(
+                Mensaje.telefono == telefono, Mensaje.role == "user", Mensaje.timestamp >= limite
+            )
+        )
+        return len(resultado.scalars().all())
+
+
 async def inicializar_db():
     """Crea las tablas si no existen."""
     async with engine.begin() as conn:

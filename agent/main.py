@@ -25,6 +25,7 @@ from agent.memory import (
     limpiar_eventos_viejos,
     marcar_derivado,
     marcar_evento_procesado,
+    mensajes_recientes_de,
     obtener_derivacion,
     obtener_historial,
 )
@@ -256,6 +257,25 @@ async def procesar_mensaje(msg: MensajeEntrante):
             # Primera vez que este cliente escribe (o volvio a escribir sin estar
             # derivado).
             if not DERIVAR_AUTOMATICAMENTE:
+                # Salvaguarda anti-loop: si llegaron muchos mensajes de este numero en
+                # muy poco tiempo, es un ritmo imposible para una persona tipeando —
+                # probablemente sea otro bot. Se corta la conversacion automatica y se
+                # deriva, en vez de seguir respondiendo sin parar.
+                UMBRAL_MENSAJES = 6
+                VENTANA_SEGUNDOS = 60
+                recientes = await mensajes_recientes_de(msg.telefono, VENTANA_SEGUNDOS)
+                if recientes >= UMBRAL_MENSAJES:
+                    logger.warning(
+                        f"Posible bot detectado en {msg.telefono}: {recientes} mensajes "
+                        f"en los ultimos {VENTANA_SEGUNDOS}s. Se corta la IA y se deriva."
+                    )
+                    await marcar_derivado(msg.telefono, "otro", operador_para("otro"))
+                    await notificar_operador(
+                        operador_para("otro"), msg.telefono,
+                        f"[POSIBLE BOT — ritmo de mensajes anormal] {msg.texto}",
+                    )
+                    return
+
                 # Modo FAQ normal: la IA responde de verdad usando el system prompt
                 # (informacion de la inmobiliaria, tono, casos de uso).
                 historial = await obtener_historial(msg.telefono)
