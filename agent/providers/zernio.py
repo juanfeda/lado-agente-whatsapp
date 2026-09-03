@@ -80,6 +80,29 @@ class ProveedorZernio(ProveedorWhatsApp):
             return False
         return True
 
+    async def _procesar_mensaje_saliente(self, mensaje: dict, destinatario_hint: dict) -> None:
+        """
+        Chequea un mensaje SALIENTE (mandado desde el numero del bot, por cualquier via)
+        y, si no lo mando el propio bot, marca esa conversacion como derivada en silencio.
+
+        Se llama tanto para el evento message.sent como para un message.received que
+        venga marcado como saliente (eco de un mensaje mandado desde la app nativa).
+        """
+        message_id = mensaje.get("platformMessageId") or mensaje.get("id") or ""
+        if not message_id or await es_mensaje_propio(message_id):
+            return  # lo mando el bot, no hacer nada
+
+        telefono = ""
+        if isinstance(destinatario_hint, dict):
+            telefono = (destinatario_hint.get("phoneNumber") or destinatario_hint.get("id") or "")
+        elif isinstance(destinatario_hint, str):
+            telefono = destinatario_hint
+        telefono = telefono.lstrip("+")
+
+        if telefono:
+            await marcar_derivado(telefono, "otro", operador_para("otro"))
+            logger.info(f"Mensaje manual detectado hacia {telefono}: el bot deja de responderle")
+
     async def parsear_webhook(self, request: Request) -> list[MensajeEntrante]:
         """Normaliza el evento message.received de Zernio."""
         payload = await request.json()
@@ -87,23 +110,10 @@ class ProveedorZernio(ProveedorWhatsApp):
         evento = payload.get("event")
 
         if evento == "message.sent":
-            # Un mensaje saliente: si el ID no es de los que mando el propio bot, es que
-            # un humano le contesto a mano desde el inbox de Zernio o la app. En ese caso
-            # el bot se calla para ese cliente hasta que alguien lo desmarque.
             mensaje = payload.get("message") or {}
-            if mensaje.get("platform") != "whatsapp":
-                return []
-            message_id = mensaje.get("platformMessageId") or mensaje.get("id") or ""
-            if not message_id or await es_mensaje_propio(message_id):
-                return []  # lo mando el bot, no hacer nada
-
-            remitente = mensaje.get("recipient") or mensaje.get("to") or {}
-            telefono = (
-                (remitente.get("phoneNumber") if isinstance(remitente, dict) else remitente) or ""
-            ).lstrip("+")
-            if telefono:
-                await marcar_derivado(telefono, "otro", operador_para("otro"))
-                logger.info(f"Mensaje manual detectado hacia {telefono}: el bot deja de responderle")
+            if mensaje.get("platform") == "whatsapp":
+                destinatario = mensaje.get("recipient") or mensaje.get("to") or {}
+                await self._procesar_mensaje_saliente(mensaje, destinatario)
             return []
 
         if evento != "message.received":
@@ -123,6 +133,18 @@ class ProveedorZernio(ProveedorWhatsApp):
         if not telefono:
             telefono = remitente.get("businessScopedUserId") or remitente.get("id") or ""
 
+        es_saliente = mensaje.get("direction") != "incoming"
+
+        if es_saliente:
+            # Eco de un mensaje mandado desde la app nativa con el numero del bot:
+            # llega como "message.received" pero en realidad es saliente hacia el cliente.
+            # Aca "sender" en realidad describe al negocio, no al cliente — el destinatario
+            # (el cliente) suele venir en "recipient"/"to"; si no esta, no hay forma de saber
+            # a quien va y se ignora.
+            destinatario = mensaje.get("recipient") or mensaje.get("to") or remitente
+            await self._procesar_mensaje_saliente(mensaje, destinatario)
+            return []
+
         cuenta = payload.get("account") or {}
 
         return [
@@ -130,8 +152,7 @@ class ProveedorZernio(ProveedorWhatsApp):
                 telefono=telefono,
                 texto=mensaje.get("text") or "",
                 mensaje_id=mensaje.get("platformMessageId") or mensaje.get("id") or "",
-                # Zernio marca la direccion: solo contestamos lo que entra
-                es_propio=mensaje.get("direction") != "incoming",
+                es_propio=False,  # ya filtramos los salientes arriba
                 contexto={
                     "evento_id": payload.get("id", ""),
                     "conversation_id": mensaje.get("conversationId", ""),
