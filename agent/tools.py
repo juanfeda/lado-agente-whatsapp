@@ -93,8 +93,11 @@ async def buscar_propiedades(
 
 
 def operador_para(categoria: str) -> str:
-    """Devuelve el numero de operador segun la categoria clasificada."""
-    return OPERADOR_ALQUILERES if categoria == "alquiler" else OPERADOR_OTRO
+    """
+    Devuelve el numero de operador segun la categoria, o "" si no hay operador (categoria
+    'otro' se queda en el numero del bot, atendida a mano por vos — no se notifica a nadie).
+    """
+    return OPERADOR_ALQUILERES if categoria == "alquiler" else ""
 
 
 async def notificar_operador(operador: str, telefono_cliente: str, mensaje_cliente: str) -> bool:

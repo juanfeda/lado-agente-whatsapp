@@ -74,7 +74,28 @@ HERRAMIENTAS = [
                 "rooms": {"type": "integer", "description": "Cantidad minima de ambientes"},
             },
         },
-    }
+    },
+    {
+        "name": "derivar_conversacion",
+        "description": (
+            "Llamala cuando ya entendiste que necesita el cliente y hay que pasarlo a "
+            "atencion humana, O cuando llevas 3 mensajes tuyos en esta conversacion y "
+            "todavia no lograste entender que necesita. Categoria 'alquiler' si la "
+            "consulta es sobre alquilar una propiedad; 'otro' para cualquier otra cosa "
+            "(venta, tasacion, administracion, soporte, o si no quedo claro)."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "categoria": {"type": "string", "enum": ["alquiler", "otro"]},
+                "resumen": {
+                    "type": "string",
+                    "description": "Resumen breve (1-2 lineas) de lo que necesita el cliente, para el humano que lo va a atender",
+                },
+            },
+            "required": ["categoria", "resumen"],
+        },
+    },
 ]
 
 
@@ -183,29 +204,44 @@ async def clasificar_intencion(mensaje: str) -> str:
     return "alquiler" if "alquiler" in texto else "otro"
 
 
-async def generar_respuesta(mensaje: str, historial: list[dict]) -> tuple[str, bool]:
+async def generar_respuesta(
+    mensaje: str, historial: list[dict], turno_limite: bool = False
+) -> tuple[str, bool, dict | None]:
     """
     Genera una respuesta con Claude.
 
     Args:
         mensaje: el mensaje nuevo del cliente
         historial: los mensajes anteriores, [{"role": "user"|"assistant", "content": "..."}]
+        turno_limite: True si esta es la 3ra respuesta del bot en la conversacion — le
+            avisamos a Claude que tiene que concluir y derivar si o si en este mensaje.
 
     Returns:
-        (texto, es_respuesta_real)
+        (texto, es_respuesta_real, derivacion)
 
         "es_respuesta_real" es False cuando lo que se devuelve es un aviso tecnico
         (error o fallback) y no una respuesta del agente. main.py lo usa para no
         guardar esos avisos en el historial: si se guardaran, quedarian contaminando
         el contexto de todos los mensajes siguientes.
+
+        "derivacion" es None si la conversacion sigue normal, o
+        {"categoria": "alquiler"|"otro", "resumen": str} si Claude decidio (o el
+        limite de 3 mensajes obligo a) derivar a atencion humana.
     """
     global _soporta_esfuerzo
 
     if not mensaje or len(mensaje.strip()) < 2:
-        return obtener_mensaje_fallback(), False
+        return obtener_mensaje_fallback(), False, None
 
     mensajes = [{"role": m["role"], "content": m["content"]} for m in historial]
-    mensajes.append({"role": "user", "content": mensaje})
+    contenido_usuario = mensaje
+    if turno_limite:
+        contenido_usuario += (
+            "\n\n[SISTEMA: esta es tu 3ra respuesta en esta conversacion. Si todavia no "
+            "sabes que necesita el cliente, llama a derivar_conversacion con categoria "
+            "'otro' igual — no sigas preguntando.]"
+        )
+    mensajes.append({"role": "user", "content": contenido_usuario})
 
     system_prompt = cargar_system_prompt()
     extras = {"output_config": {"effort": ESFUERZO}} if (_soporta_esfuerzo and ESFUERZO) else {}
@@ -232,17 +268,31 @@ async def generar_respuesta(mensaje: str, historial: list[dict]) -> tuple[str, b
                 respuesta = await _llamar({})
             except Exception as e2:  # noqa: BLE001
                 logger.error(f"Error llamando a Claude: {e2}")
-                return obtener_mensaje_error(), False
+                return obtener_mensaje_error(), False, None
         else:
             logger.error(f"Error llamando a Claude: {e}")
-            return obtener_mensaje_error(), False
+            return obtener_mensaje_error(), False, None
 
     # Loop de tool use: mientras Claude pida usar una herramienta, la ejecutamos y le
     # devolvemos el resultado, hasta un maximo de vueltas para no colgar la respuesta
-    # de WhatsApp si algo entra en bucle.
+    # de WhatsApp si algo entra en bucle. derivar_conversacion es especial: corta el
+    # loop de una, no se le devuelve resultado porque no hay nada mas que conversar.
     vueltas = 0
+    derivacion = None
     while getattr(respuesta, "stop_reason", None) == "tool_use" and vueltas < 4:
         vueltas += 1
+
+        llamada_derivar = next(
+            (b for b in respuesta.content if b.type == "tool_use" and b.name == "derivar_conversacion"), None
+        )
+        if llamada_derivar is not None:
+            derivacion = {
+                "categoria": llamada_derivar.input.get("categoria", "otro"),
+                "resumen": llamada_derivar.input.get("resumen", ""),
+            }
+            logger.info(f"Claude decidio derivar: {derivacion}")
+            break
+
         mensajes.append({"role": "assistant", "content": respuesta.content})
 
         resultados_tools = []
@@ -265,7 +315,7 @@ async def generar_respuesta(mensaje: str, historial: list[dict]) -> tuple[str, b
             respuesta = await _llamar(parametros_extra)
         except Exception as e:  # noqa: BLE001
             logger.error(f"Error llamando a Claude durante el tool use: {e}")
-            return obtener_mensaje_error(), False
+            return obtener_mensaje_error(), False, None
 
     if getattr(respuesta, "stop_reason", None) == "max_tokens":
         logger.warning(
@@ -274,12 +324,14 @@ async def generar_respuesta(mensaje: str, historial: list[dict]) -> tuple[str, b
         )
 
     texto = _extraer_texto(respuesta)
-    if not texto:
+    if not texto and derivacion is None:
         logger.warning("Claude devolvio una respuesta sin texto")
-        return obtener_mensaje_fallback(), False
+        return obtener_mensaje_fallback(), False, None
 
     logger.info(
         f"Respuesta generada con {MODELO} "
         f"({respuesta.usage.input_tokens} in / {respuesta.usage.output_tokens} out)"
     )
-    return texto, True
+    # Si Claude derivo, "texto" puede venir vacio (llamo al tool sin agregar nada mas);
+    # en ese caso no hay nada para guardar en el historial del cliente.
+    return texto, bool(texto) and derivacion is None, derivacion

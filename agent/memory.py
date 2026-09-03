@@ -96,6 +96,39 @@ class ConversacionDerivada(Base):
     activo: Mapped[bool] = mapped_column(Boolean, default=True)
 
 
+class UltimoClientePorOperador(Base):
+    """
+    Ultimo cliente que se le notifico a cada operador. Sirve para que /tomo y /listo
+    funcionen SIN tener que copiar y pegar el telefono del cliente.
+    """
+
+    __tablename__ = "ultimo_cliente_por_operador"
+
+    operador: Mapped[str] = mapped_column(String(50), primary_key=True)
+    telefono_cliente: Mapped[str] = mapped_column(String(50))
+    actualizado_en: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=ahora)
+
+
+async def marcar_ultimo_cliente(operador: str, telefono_cliente: str):
+    """Recuerda cual fue el ultimo cliente que se le noti a este operador."""
+    async with async_session() as session:
+        await session.execute(delete(UltimoClientePorOperador).where(UltimoClientePorOperador.operador == operador))
+        session.add(
+            UltimoClientePorOperador(operador=operador, telefono_cliente=telefono_cliente, actualizado_en=ahora())
+        )
+        await session.commit()
+
+
+async def obtener_ultimo_cliente(operador: str) -> str | None:
+    """El ultimo cliente notificado a este operador, o None si no hay ninguno."""
+    async with async_session() as session:
+        resultado = await session.execute(
+            select(UltimoClientePorOperador).where(UltimoClientePorOperador.operador == operador)
+        )
+        fila = resultado.scalar_one_or_none()
+    return fila.telefono_cliente if fila else None
+
+
 class MensajePropio(Base):
     """
     IDs de los mensajes que el propio bot mando (via su API), para poder distinguirlos

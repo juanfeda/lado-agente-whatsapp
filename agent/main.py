@@ -16,7 +16,7 @@ from dotenv import load_dotenv
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Request
 from fastapi.responses import PlainTextResponse
 
-from agent.brain import clasificar_intencion, generar_respuesta, obtener_mensaje_error
+from agent.brain import generar_respuesta, obtener_mensaje_error
 from agent.memory import (
     desmarcar_derivado,
     guardar_mensaje,
@@ -25,9 +25,11 @@ from agent.memory import (
     limpiar_eventos_viejos,
     marcar_derivado,
     marcar_evento_procesado,
+    marcar_ultimo_cliente,
     mensajes_recientes_de,
     obtener_derivacion,
     obtener_historial,
+    obtener_ultimo_cliente,
 )
 from agent.providers import obtener_proveedor
 from agent.providers.base import MensajeEntrante
@@ -49,12 +51,6 @@ logger = logging.getLogger("agentkit")
 logger.setLevel(logging.DEBUG if ENVIRONMENT == "development" else logging.INFO)
 
 PORT = int(os.getenv("PORT", "8000"))
-
-# Interruptor temporal: mientras el template de WhatsApp no este aprobado, las
-# notificaciones a operadores fallan. En "false", el bot responde con la IA normal
-# (FAQ, leads, soporte) en vez de derivar todo de una. Cambialo a "true" (o borralo,
-# es el default) cuando el template ya este aprobado y las notificaciones funcionen.
-DERIVAR_AUTOMATICAMENTE = (os.getenv("DERIVAR_AUTOMATICAMENTE") or "true").strip().lower() == "true"
 
 # Un candado por numero de telefono. En WhatsApp es normal que alguien mande "hola" y
 # medio segundo despues la pregunta de verdad: sin esto los dos mensajes se procesarian
@@ -195,12 +191,17 @@ async def webhook_handler(request: Request, tareas: BackgroundTasks):
             if texto_lower.startswith("/tomo") or texto_lower.startswith("/listo"):
                 es_tomo = texto_lower.startswith("/tomo")
                 partes = texto.split()
-                telefono_cliente = "".join(c for c in (partes[1] if len(partes) > 1 else "") if c.isdigit())
+                telefono_escrito = "".join(c for c in (partes[1] if len(partes) > 1 else "") if c.isdigit())
+                # Sin numero: usamos el ultimo cliente que se le notifico a este operador,
+                # asi no hace falta copiar y pegar nada.
+                telefono_cliente = telefono_escrito or await obtener_ultimo_cliente(msg.telefono)
 
                 if not telefono_cliente:
                     comando = "/tomo" if es_tomo else "/listo"
                     await proveedor.enviar_mensaje(
-                        msg.telefono, f"Usa: {comando} 5491122334455 (el telefono del cliente)", msg.contexto
+                        msg.telefono,
+                        f"No tengo ningun cliente reciente tuyo. Usa: {comando} 5491122334455",
+                        msg.contexto,
                     )
                 elif es_tomo:
                     await marcar_derivado(telefono_cliente, "otro", msg.telefono)
@@ -233,7 +234,7 @@ async def webhook_handler(request: Request, tareas: BackgroundTasks):
 
 MENSAJE_DERIVACION = {
     "alquiler": "Gracias! Ya te estamos derivando con nuestro equipo de alquileres, en breve te contactan.",
-    "otro": "Gracias! Ya te estamos derivando con un asesor de nuestro equipo, en breve te contactan.",
+    "otro": "Gracias! En breve te contacta uno de nuestros asesores.",
 }
 
 
@@ -251,10 +252,15 @@ async def procesar_mensaje(msg: MensajeEntrante):
             derivacion = await obtener_derivacion(msg.telefono)
 
             if derivacion is not None:
-                # Ya esta derivado: el agente no contesta, solo le reenvia el mensaje
-                # nuevo al operador que se quedo con la conversacion.
-                await notificar_operador(derivacion["operador"], msg.telefono, msg.texto)
-                logger.info(f"Mensaje de {msg.telefono} reenviado al operador (sin respuesta de IA)")
+                # Ya esta derivado: el agente no contesta.
+                operador = derivacion["operador"]
+                if operador:
+                    # Categoria "alquiler": el operador se entera de cada mensaje nuevo.
+                    await notificar_operador(operador, msg.telefono, msg.texto)
+                    await marcar_ultimo_cliente(operador, msg.telefono)
+                # Categoria "otro" (sin operador): sigue en el numero del bot, lo ves
+                # vos mismo en el inbox — no hay a quien notificar.
+                logger.info(f"Mensaje de {msg.telefono} en modo derivado (sin respuesta de IA)")
                 return
 
             # Si vos (u otro humano) ya le escribiste primero a este cliente por la app
@@ -262,47 +268,55 @@ async def procesar_mensaje(msg: MensajeEntrante):
             # (sin mandarle ningun mensaje) y listo, queda en manos humanas.
             conversation_id = msg.contexto.get("conversation_id", "")
             if conversation_id and await proveedor.conversacion_iniciada_por_negocio(conversation_id):
-                await marcar_derivado(msg.telefono, "otro", operador_para("otro"))
+                await marcar_derivado(msg.telefono, "otro", "")
                 logger.info(f"Conversacion con {msg.telefono} la inicio el negocio: el bot no responde")
                 return
 
-            # Primera vez que este cliente escribe (o volvio a escribir sin estar
-            # derivado).
-            if not DERIVAR_AUTOMATICAMENTE:
-                # Salvaguarda anti-loop: si llegaron muchos mensajes de este numero en
-                # muy poco tiempo, es un ritmo imposible para una persona tipeando —
-                # probablemente sea otro bot. Se corta la conversacion automatica y se
-                # deriva, en vez de seguir respondiendo sin parar.
-                UMBRAL_MENSAJES = 6
-                VENTANA_SEGUNDOS = 60
-                recientes = await mensajes_recientes_de(msg.telefono, VENTANA_SEGUNDOS)
-                if recientes >= UMBRAL_MENSAJES:
-                    logger.warning(
-                        f"Posible bot detectado en {msg.telefono}: {recientes} mensajes "
-                        f"en los ultimos {VENTANA_SEGUNDOS}s. Se corta la IA y se deriva."
-                    )
-                    await marcar_derivado(msg.telefono, "otro", operador_para("otro"))
-                    await notificar_operador(
-                        operador_para("otro"), msg.telefono,
-                        f"[POSIBLE BOT — ritmo de mensajes anormal] {msg.texto}",
-                    )
-                    return
+            # Salvaguarda anti-loop: si llegaron muchos mensajes de este numero en muy
+            # poco tiempo, es un ritmo imposible para una persona tipeando — probablemente
+            # sea otro bot. Se corta la conversacion automatica y se deriva.
+            UMBRAL_MENSAJES = 6
+            VENTANA_SEGUNDOS = 60
+            recientes = await mensajes_recientes_de(msg.telefono, VENTANA_SEGUNDOS)
+            if recientes >= UMBRAL_MENSAJES:
+                logger.warning(
+                    f"Posible bot detectado en {msg.telefono}: {recientes} mensajes "
+                    f"en los ultimos {VENTANA_SEGUNDOS}s. Se corta la IA y se deriva."
+                )
+                await marcar_derivado(msg.telefono, "otro", "")
+                return
 
-                # Modo FAQ normal: la IA responde de verdad usando el system prompt
-                # (informacion de la inmobiliaria, tono, casos de uso).
-                historial = await obtener_historial(msg.telefono)
-                respuesta, es_respuesta_real = await generar_respuesta(msg.texto, historial)
-            else:
-                # Modo derivacion: clasificamos y derivamos de una, no generamos
-                # respuesta de IA.
-                categoria = await clasificar_intencion(msg.texto)
+            # Conversacion normal: la IA tiene hasta 3 mensajes propios para entender que
+            # necesita el cliente. Contamos cuantas respuestas de bot hubo ya, para avisarle
+            # cuando esta llegando al limite.
+            historial = await obtener_historial(msg.telefono)
+            turnos_previos = sum(1 for m in historial if m["role"] == "assistant")
+            turno_limite = turnos_previos + 1 >= 3
+
+            respuesta, es_respuesta_real, derivacion_ia = await generar_respuesta(
+                msg.texto, historial, turno_limite=turno_limite
+            )
+
+            if derivacion_ia is None and turno_limite:
+                # Red de seguridad: si llegamos al 3er mensaje y la IA no llamo al tool
+                # de derivar igual, forzamos la derivacion nosotros (categoria "otro",
+                # no se pudo entender que necesitaba en 3 mensajes).
+                derivacion_ia = {"categoria": "otro", "resumen": "No se pudo determinar en 3 mensajes"}
+                logger.warning(f"Turno limite alcanzado sin derivar; se fuerza derivacion para {msg.telefono}")
+
+            if derivacion_ia is not None:
+                categoria = derivacion_ia.get("categoria", "otro")
+                resumen = derivacion_ia.get("resumen", "")
                 operador = operador_para(categoria)
 
                 await marcar_derivado(msg.telefono, categoria, operador)
-                await notificar_operador(operador, msg.telefono, msg.texto)
+                if operador:
+                    await notificar_operador(operador, msg.telefono, resumen or msg.texto)
+                    await marcar_ultimo_cliente(operador, msg.telefono)
 
-                respuesta = MENSAJE_DERIVACION[categoria]
-                es_respuesta_real = False  # es un aviso fijo, no una respuesta conversacional
+                if not respuesta:
+                    respuesta = MENSAJE_DERIVACION[categoria]
+                es_respuesta_real = False  # es el cierre de la conversacion, no se guarda
 
             enviado = await proveedor.enviar_mensaje(msg.telefono, respuesta, msg.contexto)
 
