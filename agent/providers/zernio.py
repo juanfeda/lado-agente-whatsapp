@@ -204,18 +204,26 @@ class ProveedorZernio(ProveedorWhatsApp):
         if r.status_code == 200:
             # Registramos el ID del mensaje que MANDAMOS NOSOTROS, para poder
             # distinguirlo despues de un mensaje que un humano mande a mano.
+            # El campo puede venir de varias formas segun el endpoint; probamos todas.
             try:
                 cuerpo_ok = r.json()
+                anidado = cuerpo_ok.get("message") or cuerpo_ok.get("data") or {}
                 message_id = (
                     cuerpo_ok.get("id")
+                    or cuerpo_ok.get("platform_message_id")
+                    or cuerpo_ok.get("platformMessageId")
                     or cuerpo_ok.get("messageId")
-                    or (cuerpo_ok.get("message") or {}).get("id")
+                    or anidado.get("id")
+                    or anidado.get("platform_message_id")
+                    or anidado.get("platformMessageId")
                     or ""
                 )
                 if message_id:
                     await marcar_mensaje_propio(message_id)
                 else:
-                    logger.warning("Zernio no devolvio un id de mensaje al enviar; no se pudo marcar como propio")
+                    logger.warning(
+                        f"Zernio no devolvio un id de mensaje reconocible al enviar. Respuesta cruda: {r.text[:300]}"
+                    )
             except ValueError:
                 pass
             return True
