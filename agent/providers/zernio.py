@@ -223,6 +223,7 @@ class ProveedorZernio(ProveedorWhatsApp):
                     or anidado.get("id")
                     or anidado.get("platform_message_id")
                     or anidado.get("platformMessageId")
+                    or anidado.get("messageId")
                     or ""
                 )
                 if message_id:
