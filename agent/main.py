@@ -20,9 +20,12 @@ from agent.brain import generar_respuesta, obtener_mensaje_error
 from agent.memory import (
     desmarcar_derivado,
     guardar_mensaje,
+    incrementar_contador_mensajes,
     inicializar_db,
     liberar_evento,
     limpiar_eventos_viejos,
+    limpiar_historial,
+    limpiar_mensajes_viejos,
     marcar_derivado,
     marcar_evento_procesado,
     marcar_ultimo_cliente,
@@ -71,12 +74,37 @@ except Exception as e:  # noqa: BLE001 — cualquier problema de configuracion
 estado_proveedor: dict = {"ok": None, "detalle": "sin verificar"}
 
 
+DIAS_RETENCION_HISTORIAL = int(os.getenv("DIAS_RETENCION_HISTORIAL") or "7")
+
+# Numero de telefono de pruebas: cada 5 mensajes se reinicia solo, para poder probar
+# el ciclo de derivacion sin llamar a /admin/reiniciar a mano cada vez.
+NUMERO_PRUEBA = os.getenv("NUMERO_PRUEBA") or "5492216737240"
+
+
+async def _limpieza_periodica():
+    """
+    Corre la limpieza de historial una vez por dia mientras el servidor este vivo.
+
+    Railway no reinicia el contenedor todos los dias, asi que limpiar solo al arrancar
+    (en el lifespan) no alcanza para que la retencion de 7 dias se cumpla de verdad en
+    un servicio que puede quedar corriendo semanas sin reiniciarse.
+    """
+    while True:
+        await asyncio.sleep(24 * 60 * 60)  # 24 horas
+        try:
+            await limpiar_eventos_viejos(dias=DIAS_RETENCION_HISTORIAL)
+            await limpiar_mensajes_viejos(dias=DIAS_RETENCION_HISTORIAL)
+        except Exception as e:  # noqa: BLE001 — un fallo puntual no debe matar la tarea de fondo
+            logger.error(f"Error en la limpieza periodica: {e}")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Prepara la base de datos y chequea el proveedor al arrancar."""
     await inicializar_db()
-    await limpiar_eventos_viejos()
-    logger.info("Base de datos lista")
+    await limpiar_eventos_viejos(dias=DIAS_RETENCION_HISTORIAL)
+    await limpiar_mensajes_viejos(dias=DIAS_RETENCION_HISTORIAL)
+    logger.info(f"Base de datos lista (retencion de historial: {DIAS_RETENCION_HISTORIAL} dias)")
     logger.info(f"Servidor AgentKit escuchando en el puerto {PORT}")
 
     global estado_proveedor
@@ -88,7 +116,11 @@ async def lifespan(app: FastAPI):
     else:
         logger.error(f"Proveedor de WhatsApp NO configurado: {error_configuracion}")
 
+    tarea_limpieza = asyncio.create_task(_limpieza_periodica())
+
     yield
+
+    tarea_limpieza.cancel()
 
 
 app = FastAPI(title="AgentKit — WhatsApp AI Agent", version="2.0.0", lifespan=lifespan)
@@ -113,6 +145,26 @@ async def admin_desmarcar(telefono: str, key: str):
 
     await desmarcar_derivado(telefono)
     logger.info(f"Desmarcado manualmente: {telefono}")
+    return {"status": "ok", "telefono": telefono}
+
+
+@app.post("/admin/reiniciar")
+async def admin_reiniciar(telefono: str, key: str):
+    """
+    Borra TODO el historial de conversacion de un numero y lo desmarca, para poder
+    probar de cero (sin esto, el contador de "3 mensajes" sigue contando desde
+    conversaciones anteriores).
+
+    Uso: POST https://tu-dominio/admin/reiniciar?telefono=5491122334455&key=TU_ADMIN_KEY
+    """
+    if not _ADMIN_KEY:
+        raise HTTPException(status_code=503, detail="ADMIN_KEY no configurada")
+    if key != _ADMIN_KEY:
+        raise HTTPException(status_code=401, detail="Clave incorrecta")
+
+    await limpiar_historial(telefono)
+    await desmarcar_derivado(telefono)
+    logger.info(f"Historial reiniciado manualmente: {telefono}")
     return {"status": "ok", "telefono": telefono}
 
 
@@ -249,6 +301,17 @@ async def procesar_mensaje(msg: MensajeEntrante):
 
     async with _candados[msg.telefono]:
         try:
+            # Numero de pruebas: cuenta CADA mensaje entrante (este cliente derivado o
+            # no) y, al llegar a un multiplo de 5, reinicia todo antes de seguir —
+            # asi se puede probar el ciclo completo (3 mensajes -> deriva) una y otra
+            # vez sin llamar a /admin/reiniciar a mano.
+            if msg.telefono == NUMERO_PRUEBA:
+                total = await incrementar_contador_mensajes(msg.telefono)
+                if total % 5 == 0:
+                    await limpiar_historial(msg.telefono)
+                    await desmarcar_derivado(msg.telefono)
+                    logger.info(f"[PRUEBA] Contador reiniciado para {msg.telefono} en el mensaje #{total}")
+
             derivacion = await obtener_derivacion(msg.telefono)
 
             if derivacion is not None:

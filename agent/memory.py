@@ -217,6 +217,52 @@ async def mensajes_recientes_de(telefono: str, segundos: int) -> int:
         return len(resultado.scalars().all())
 
 
+async def contar_mensajes_de(telefono: str) -> int:
+    """Cuenta TODOS los mensajes del cliente (role='user') de este numero, sin limite de tiempo."""
+    async with async_session() as session:
+        resultado = await session.execute(
+            select(Mensaje).where(Mensaje.telefono == telefono, Mensaje.role == "user")
+        )
+        return len(resultado.scalars().all())
+
+
+class ContadorMensajes(Base):
+    """
+    Cuenta TODOS los mensajes entrantes de un cliente, esten derivados o no — a
+    diferencia de la tabla "mensajes", que solo guarda lo que la IA realmente
+    conversa (nunca lo que llega despues de derivar). Se usa para reglas basadas
+    en "cada N mensajes", como el reinicio automatico del numero de pruebas.
+    """
+
+    __tablename__ = "contador_mensajes"
+
+    telefono: Mapped[str] = mapped_column(String(50), primary_key=True)
+    cantidad: Mapped[int] = mapped_column(Integer, default=0)
+
+
+async def incrementar_contador_mensajes(telefono: str) -> int:
+    """Suma 1 al contador de este telefono y devuelve el nuevo total."""
+    async with async_session() as session:
+        resultado = await session.execute(
+            select(ContadorMensajes).where(ContadorMensajes.telefono == telefono)
+        )
+        fila = resultado.scalar_one_or_none()
+        if fila is None:
+            fila = ContadorMensajes(telefono=telefono, cantidad=0)
+            session.add(fila)
+        fila.cantidad += 1
+        nuevo_total = fila.cantidad
+        await session.commit()
+    return nuevo_total
+
+
+async def resetear_contador_mensajes(telefono: str):
+    """Vuelve el contador de este telefono a 0."""
+    async with async_session() as session:
+        await session.execute(delete(ContadorMensajes).where(ContadorMensajes.telefono == telefono))
+        await session.commit()
+
+
 async def inicializar_db():
     """Crea las tablas si no existen."""
     async with engine.begin() as conn:
@@ -276,6 +322,22 @@ async def limpiar_eventos_viejos(dias: int = 7):
         await session.commit()
     if resultado2.rowcount:
         logger.info(f"Se limpiaron {resultado2.rowcount} mensajes propios de mas de {dias} dias")
+
+
+async def limpiar_mensajes_viejos(dias: int = 7):
+    """
+    Borra los mensajes de historial de conversacion de mas de N dias.
+
+    Con esto, el "contador de 3 mensajes" y el contexto que ve la IA arrancan solos
+    de cero para conversaciones que quedaron inactivas mas de una semana, sin tener
+    que borrar nada a mano.
+    """
+    limite = ahora() - timedelta(days=dias)
+    async with async_session() as session:
+        resultado = await session.execute(delete(Mensaje).where(Mensaje.timestamp < limite))
+        await session.commit()
+    if resultado.rowcount:
+        logger.info(f"Se limpiaron {resultado.rowcount} mensajes de historial de mas de {dias} dias")
 
 
 async def guardar_mensaje(telefono: str, role: str, content: str):
