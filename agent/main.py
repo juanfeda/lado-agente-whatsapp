@@ -185,22 +185,34 @@ async def webhook_handler(request: Request, tareas: BackgroundTasks):
             continue
 
         # Los mensajes de los propios operadores (ej: el "hola" para abrir la ventana
-        # de 24hs) no son consultas de clientes. Si escriben un comando /listo con un
-        # telefono, desmarcamos esa conversacion; cualquier otra cosa se ignora.
+        # de 24hs) no son consultas de clientes. Comandos que entienden:
+        #   /tomo <telefono>  -> el bot deja de responderle a ese cliente (lo vas a atender vos a mano)
+        #   /listo <telefono> -> el bot vuelve a responderle normal a ese cliente
         if msg.telefono in (OPERADOR_ALQUILERES, OPERADOR_OTRO):
             texto = msg.texto.strip()
-            if texto.lower().startswith("/listo"):
+            texto_lower = texto.lower()
+
+            if texto_lower.startswith("/tomo") or texto_lower.startswith("/listo"):
+                es_tomo = texto_lower.startswith("/tomo")
                 partes = texto.split()
                 telefono_cliente = "".join(c for c in (partes[1] if len(partes) > 1 else "") if c.isdigit())
-                if telefono_cliente:
+
+                if not telefono_cliente:
+                    comando = "/tomo" if es_tomo else "/listo"
+                    await proveedor.enviar_mensaje(
+                        msg.telefono, f"Usa: {comando} 5491122334455 (el telefono del cliente)", msg.contexto
+                    )
+                elif es_tomo:
+                    await marcar_derivado(telefono_cliente, "otro", msg.telefono)
+                    logger.info(f"Operador {msg.telefono} tomo a {telefono_cliente} con /tomo")
+                    await proveedor.enviar_mensaje(
+                        msg.telefono, f"Listo, el bot deja de responderle a {telefono_cliente}. Atendelo vos.", msg.contexto
+                    )
+                else:
                     await desmarcar_derivado(telefono_cliente)
                     logger.info(f"Operador {msg.telefono} desmarco a {telefono_cliente} con /listo")
                     await proveedor.enviar_mensaje(
                         msg.telefono, f"Listo, {telefono_cliente} vuelve a atenderlo el bot.", msg.contexto
-                    )
-                else:
-                    await proveedor.enviar_mensaje(
-                        msg.telefono, "Usa: /listo 5491122334455 (el telefono del cliente)", msg.contexto
                     )
             else:
                 logger.info(f"Mensaje de un operador ({msg.telefono}): se ignora, no es un cliente")
