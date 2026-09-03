@@ -109,6 +109,13 @@ class ProveedorZernio(ProveedorWhatsApp):
 
         evento = payload.get("event")
 
+        # DIAGNOSTICO TEMPORAL: mostrar el payload crudo de cualquier evento que no sea
+        # un mensaje entrante normal del cliente, para confirmar los nombres de campo
+        # reales que usa esta cuenta.
+        direccion = (payload.get("message") or {}).get("direction")
+        if evento != "message.received" or direccion != "incoming":
+            logger.warning(f"PAYLOAD CRUDO evento={evento!r} direction={direccion!r}: {payload}")
+
         if evento == "message.sent":
             mensaje = payload.get("message") or {}
             if mensaje.get("platform") == "whatsapp":
