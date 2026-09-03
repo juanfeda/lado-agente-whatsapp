@@ -16,7 +16,9 @@ import os
 import httpx
 from fastapi import Request
 
+from agent.memory import es_mensaje_propio, marcar_derivado, marcar_mensaje_propio
 from agent.providers.base import MensajeEntrante, ProveedorWhatsApp
+from agent.tools import operador_para
 
 logger = logging.getLogger("agentkit")
 
@@ -83,8 +85,29 @@ class ProveedorZernio(ProveedorWhatsApp):
         payload = await request.json()
 
         evento = payload.get("event")
+
+        if evento == "message.sent":
+            # Un mensaje saliente: si el ID no es de los que mando el propio bot, es que
+            # un humano le contesto a mano desde el inbox de Zernio o la app. En ese caso
+            # el bot se calla para ese cliente hasta que alguien lo desmarque.
+            mensaje = payload.get("message") or {}
+            if mensaje.get("platform") != "whatsapp":
+                return []
+            message_id = mensaje.get("platformMessageId") or mensaje.get("id") or ""
+            if not message_id or await es_mensaje_propio(message_id):
+                return []  # lo mando el bot, no hacer nada
+
+            remitente = mensaje.get("recipient") or mensaje.get("to") or {}
+            telefono = (
+                (remitente.get("phoneNumber") if isinstance(remitente, dict) else remitente) or ""
+            ).lstrip("+")
+            if telefono:
+                await marcar_derivado(telefono, "otro", operador_para("otro"))
+                logger.info(f"Mensaje manual detectado hacia {telefono}: el bot deja de responderle")
+            return []
+
         if evento != "message.received":
-            # message.sent, message.delivered, message.read, etc. no se contestan
+            # message.delivered, message.read, etc. no se contestan
             logger.debug(f"Evento ignorado: {evento}")
             return []
 
@@ -158,6 +181,22 @@ class ProveedorZernio(ProveedorWhatsApp):
             return False
 
         if r.status_code == 200:
+            # Registramos el ID del mensaje que MANDAMOS NOSOTROS, para poder
+            # distinguirlo despues de un mensaje que un humano mande a mano.
+            try:
+                cuerpo_ok = r.json()
+                message_id = (
+                    cuerpo_ok.get("id")
+                    or cuerpo_ok.get("messageId")
+                    or (cuerpo_ok.get("message") or {}).get("id")
+                    or ""
+                )
+                if message_id:
+                    await marcar_mensaje_propio(message_id)
+                else:
+                    logger.warning("Zernio no devolvio un id de mensaje al enviar; no se pudo marcar como propio")
+            except ValueError:
+                pass
             return True
 
         # Zernio responde {"error": ..., "type": ..., "code": ...}.

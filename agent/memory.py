@@ -96,6 +96,41 @@ class ConversacionDerivada(Base):
     activo: Mapped[bool] = mapped_column(Boolean, default=True)
 
 
+class MensajePropio(Base):
+    """
+    IDs de los mensajes que el propio bot mando (via su API), para poder distinguirlos
+    de los que un humano manda a mano desde el inbox de Zernio o la app de WhatsApp.
+    """
+
+    __tablename__ = "mensajes_propios"
+
+    message_id: Mapped[str] = mapped_column(String(200), primary_key=True)
+    creado_en: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=ahora, index=True)
+
+
+async def marcar_mensaje_propio(message_id: str):
+    """Registra que ESTE mensaje lo mando el bot, no un humano."""
+    if not message_id:
+        return
+    async with async_session() as session:
+        session.add(MensajePropio(message_id=message_id, creado_en=ahora()))
+        try:
+            await session.commit()
+        except IntegrityError:
+            await session.rollback()  # ya estaba registrado, no pasa nada
+
+
+async def es_mensaje_propio(message_id: str) -> bool:
+    """True si ESTE mensaje lo mando el bot (no un humano a mano)."""
+    if not message_id:
+        return False
+    async with async_session() as session:
+        resultado = await session.execute(
+            select(MensajePropio).where(MensajePropio.message_id == message_id)
+        )
+        return resultado.scalar_one_or_none() is not None
+
+
 async def marcar_derivado(telefono: str, categoria: str, operador: str):
     """Marca una conversacion como derivada a un operador. Sobreescribe si ya existia."""
     async with async_session() as session:
@@ -184,6 +219,14 @@ async def limpiar_eventos_viejos(dias: int = 7):
         await session.commit()
     if resultado.rowcount:
         logger.info(f"Se limpiaron {resultado.rowcount} eventos de mas de {dias} dias")
+
+    async with async_session() as session:
+        resultado2 = await session.execute(
+            delete(MensajePropio).where(MensajePropio.creado_en < limite)
+        )
+        await session.commit()
+    if resultado2.rowcount:
+        logger.info(f"Se limpiaron {resultado2.rowcount} mensajes propios de mas de {dias} dias")
 
 
 async def guardar_mensaje(telefono: str, role: str, content: str):

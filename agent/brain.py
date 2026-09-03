@@ -19,10 +19,6 @@ load_dotenv()
 logger = logging.getLogger("agentkit")
 
 client = AsyncAnthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
-logger.warning(
-    f"ANTHROPIC_API_KEY: longitud={len(os.getenv('ANTHROPIC_API_KEY') or '')} "
-    f"empieza_con={(os.getenv('ANTHROPIC_API_KEY') or '')[:12]!r}"
-)
 
 # El modelo se cambia desde .env, sin tocar el codigo.
 #   claude-opus-5     el mas capaz             $5 / $25 por millon de tokens
