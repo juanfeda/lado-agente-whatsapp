@@ -101,16 +101,54 @@ _CRM_API_URL = os.getenv("CRM_API_URL", "")
 _CRM_API_KEY = os.getenv("CRM_API_KEY", "")
 
 
+async def buscar_contacto_crm(telefono: str) -> dict:
+    """
+    Busca si este telefono ya esta en la agenda del CRM. Usa el mismo endpoint
+    leads_api.php pero con GET, pasando el telefono por query string.
+
+    Retorna {"existe": bool, "nombre": str, "apellido": str} — nombre/apellido
+    vacios si no existe.
+    """
+    if not _CRM_API_URL or not _CRM_API_KEY:
+        logger.warning("No se pudo verificar el contacto: falta CRM_API_URL o CRM_API_KEY")
+        return {"existe": False, "nombre": "", "apellido": ""}
+
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as cliente:
+            r = await cliente.get(
+                _CRM_API_URL, params={"telefono": telefono}, headers={"X-Api-Key": _CRM_API_KEY}
+            )
+    except httpx.HTTPError as e:
+        logger.error(f"Error verificando contacto en el CRM: {e}")
+        return {"existe": False, "nombre": "", "apellido": ""}
+
+    if r.status_code != 200:
+        logger.error(f"leads_api.php (GET) respondio {r.status_code}: {r.text[:200]}")
+        return {"existe": False, "nombre": "", "apellido": ""}
+
+    try:
+        return r.json()
+    except ValueError:
+        logger.error(f"leads_api.php (GET) no devolvio JSON valido: {r.text[:300]}")
+        return {"existe": False, "nombre": "", "apellido": ""}
+
+
 async def crear_lead_crm(
     telefono: str,
     nombre: str = "",
+    apellido: str = "",
     tipo: str = "compra",
     zona: str = "",
+    tipo_propiedad: str = "",
+    ambientes: int | None = None,
+    dormitorios: int | None = None,
+    presupuesto_min: float | None = None,
     presupuesto_max: float | None = None,
     notas: str = "",
 ) -> bool:
     """
-    Carga un lead nuevo en el CRM de ladoinmobiliaria.com.ar via leads_api.php.
+    Carga un lead nuevo en el CRM de ladoinmobiliaria.com.ar via leads_api.php. Si el
+    cliente dio nombre + apellido, leads_api.php tambien lo carga en la agenda.
     No frena la conversacion si falla — solo loguea el error.
     """
     if not _CRM_API_URL or not _CRM_API_KEY:
@@ -120,10 +158,18 @@ async def crear_lead_crm(
     payload = {
         "telefono": telefono,
         "nombre": nombre,
+        "apellido": apellido,
         "tipo": tipo,
         "zona_preferida": zona,
+        "tipo_propiedad": tipo_propiedad,
         "notas": notas,
     }
+    if ambientes is not None:
+        payload["ambientes"] = ambientes
+    if dormitorios is not None:
+        payload["dormitorios"] = dormitorios
+    if presupuesto_min is not None:
+        payload["presupuesto_min"] = presupuesto_min
     if presupuesto_max is not None:
         payload["presupuesto_max"] = presupuesto_max
 

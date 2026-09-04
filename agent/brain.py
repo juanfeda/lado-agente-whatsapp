@@ -13,7 +13,7 @@ import yaml
 from anthropic import AsyncAnthropic
 from dotenv import load_dotenv
 
-from agent.tools import buscar_propiedades
+from agent.tools import buscar_contacto_crm, buscar_propiedades
 
 load_dotenv()
 logger = logging.getLogger("agentkit")
@@ -76,13 +76,25 @@ HERRAMIENTAS = [
         },
     },
     {
+        "name": "verificar_contacto",
+        "description": (
+            "Consulta si el cliente (por su numero de WhatsApp) ya esta cargado en la "
+            "agenda del CRM. Llamala SIEMPRE antes de derivar_a_humano, apenas tengas "
+            "nombre y apellido del cliente. Si ya existe con datos distintos a los que "
+            "te acaba de dar, preguntale si quiere actualizarlos antes de continuar."
+        ),
+        "input_schema": {"type": "object", "properties": {}},
+    },
+    {
         "name": "derivar_a_humano",
         "description": (
-            "Llamala cuando el cliente ya esta listo para que un humano continue: te dio "
-            "nombre y un contacto (telefono o mail), quiere coordinar una visita, avanzar "
-            "con una propiedad puntual, o pidio explicitamente hablar con alguien del "
-            "equipo. Pasale un resumen breve con la propiedad de interes (si la hay), "
-            "nombre y contacto del cliente."
+            "Llamala cuando el cliente ya esta listo para que un humano continue. "
+            "Requisito obligatorio: antes de llamarla, siempre pedile nombre, apellido "
+            "y confirmá su numero de telefono de contacto (no alcanza con que quiera "
+            "coordinar una visita o hablar con alguien — sin esos 3 datos, pedilos "
+            "primero). Tambien llamala si el cliente pidio explicitamente hablar con "
+            "alguien del equipo. Pasale un resumen breve con la propiedad de interes "
+            "(si la hay) y el contexto de la consulta."
         ),
         "input_schema": {
             "type": "object",
@@ -99,27 +111,40 @@ HERRAMIENTAS = [
                 },
                 "nombre_cliente": {
                     "type": "string",
-                    "description": "Nombre del cliente, tal como te lo dio. Vacio si no lo dio.",
+                    "description": "Nombre de pila del cliente, tal como te lo confirmo.",
+                },
+                "apellido_cliente": {
+                    "type": "string",
+                    "description": "Apellido del cliente, tal como te lo confirmo.",
                 },
                 "contacto": {
                     "type": "string",
-                    "description": "Telefono o mail de contacto que dio el cliente (si es distinto de su WhatsApp). Vacio si no dio otro.",
+                    "description": "Telefono o mail de contacto confirmado (si es distinto de su WhatsApp). Vacio si es el mismo WhatsApp.",
                 },
                 "zona": {"type": "string", "description": "Zona o barrio de interes, si se menciono. Vacio si no."},
+                "tipo_propiedad": {
+                    "type": "string",
+                    "description": "Tipo de propiedad que busca (casa, departamento, terreno, local, etc.). Vacio si no se menciono.",
+                },
+                "ambientes": {"type": "integer", "description": "Cantidad de ambientes que busca, si la menciono"},
+                "dormitorios": {"type": "integer", "description": "Cantidad de dormitorios que busca, si la menciono"},
+                "presupuesto_min": {"type": "number", "description": "Presupuesto minimo mencionado, si lo hay"},
                 "presupuesto_max": {"type": "number", "description": "Presupuesto maximo mencionado, si lo hay"},
                 "resumen": {
                     "type": "string",
                     "description": "Resumen para el humano que va a seguir: propiedad de interes y contexto de la consulta",
                 },
             },
-            "required": ["operacion", "resumen"],
+            "required": ["operacion", "nombre_cliente", "apellido_cliente", "resumen"],
         },
     },
 ]
 
 
-async def _ejecutar_tool(nombre: str, entrada: dict) -> dict:
+async def _ejecutar_tool(nombre: str, entrada: dict, telefono_cliente: str = "") -> dict:
     """Despacha una llamada a herramienta hecha por Claude a la funcion real."""
+    if nombre == "verificar_contacto":
+        return await buscar_contacto_crm(telefono_cliente)
     if nombre == "buscar_propiedades":
         return await buscar_propiedades(
             operation=entrada.get("operation", ""),
@@ -199,7 +224,7 @@ def _es_error_de_esfuerzo(error: Exception) -> bool:
 
 
 async def generar_respuesta(
-    mensaje: str, historial: list[dict], nota_sistema: str = ""
+    mensaje: str, historial: list[dict], nota_sistema: str = "", telefono_cliente: str = ""
 ) -> tuple[str, bool, dict | None]:
     """
     Genera una respuesta con Claude.
@@ -278,8 +303,13 @@ async def generar_respuesta(
                 "operacion": llamada_derivar.input.get("operacion", "venta"),
                 "resumen": llamada_derivar.input.get("resumen", ""),
                 "nombre_cliente": llamada_derivar.input.get("nombre_cliente", ""),
+                "apellido_cliente": llamada_derivar.input.get("apellido_cliente", ""),
                 "contacto": llamada_derivar.input.get("contacto", ""),
                 "zona": llamada_derivar.input.get("zona", ""),
+                "tipo_propiedad": llamada_derivar.input.get("tipo_propiedad", ""),
+                "ambientes": llamada_derivar.input.get("ambientes"),
+                "dormitorios": llamada_derivar.input.get("dormitorios"),
+                "presupuesto_min": llamada_derivar.input.get("presupuesto_min"),
                 "presupuesto_max": llamada_derivar.input.get("presupuesto_max"),
             }
             logger.info(f"Claude decidio derivar a un humano: {derivar}")
@@ -292,7 +322,7 @@ async def generar_respuesta(
             if bloque.type != "tool_use":
                 continue
             logger.info(f"Claude llamo a la herramienta {bloque.name} con {bloque.input}")
-            resultado = await _ejecutar_tool(bloque.name, bloque.input)
+            resultado = await _ejecutar_tool(bloque.name, bloque.input, telefono_cliente)
             resultados_tools.append(
                 {
                     "type": "tool_result",

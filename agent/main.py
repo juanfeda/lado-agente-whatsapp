@@ -508,8 +508,13 @@ async def _derivar_desde_ia(msg: MensajeEntrante, derivar: dict, respuesta_ia: s
     await crear_lead_crm(
         telefono=msg.telefono,
         nombre=derivar.get("nombre_cliente", ""),
+        apellido=derivar.get("apellido_cliente", ""),
         tipo=tipo_crm,
         zona=derivar.get("zona", ""),
+        tipo_propiedad=derivar.get("tipo_propiedad", ""),
+        ambientes=derivar.get("ambientes"),
+        dormitorios=derivar.get("dormitorios"),
+        presupuesto_min=derivar.get("presupuesto_min"),
         presupuesto_max=derivar.get("presupuesto_max"),
         notas=resumen,
     )
@@ -608,7 +613,7 @@ async def procesar_mensaje(msg: MensajeEntrante):
                     await marcar_etapa(msg.telefono, "ia_venta")
                     nota = "El cliente ya eligio: busca propiedades EN VENTA. Ayudalo a buscar."
                     respuesta, es_respuesta_real, derivar = await generar_respuesta(
-                        "Quiero ver propiedades en venta", [], nota_sistema=nota
+                        "Quiero ver propiedades en venta", [], nota_sistema=nota, telefono_cliente=msg.telefono
                     )
                     if derivar is not None:
                         await _derivar_desde_ia(msg, derivar, respuesta)
@@ -630,7 +635,7 @@ async def procesar_mensaje(msg: MensajeEntrante):
                     await marcar_etapa(msg.telefono, "ia_alquiler")
                     nota = "El cliente ya eligio: busca propiedades EN ALQUILER. Ayudalo a buscar."
                     respuesta, es_respuesta_real, derivar = await generar_respuesta(
-                        "Quiero ver propiedades en alquiler", [], nota_sistema=nota
+                        "Quiero ver propiedades en alquiler", [], nota_sistema=nota, telefono_cliente=msg.telefono
                     )
                     if derivar is not None:
                         await _derivar_desde_ia(msg, derivar, respuesta)
@@ -650,7 +655,7 @@ async def procesar_mensaje(msg: MensajeEntrante):
             # ── La IA ya esta ayudando a buscar (venta o alquiler) ──
             if etapa in ("ia_venta", "ia_alquiler"):
                 historial = await obtener_historial(msg.telefono)
-                respuesta, es_respuesta_real, derivar = await generar_respuesta(msg.texto, historial)
+                respuesta, es_respuesta_real, derivar = await generar_respuesta(msg.texto, historial, telefono_cliente=msg.telefono)
 
                 if derivar is not None:
                     await guardar_mensaje(msg.telefono, "user", msg.texto)
