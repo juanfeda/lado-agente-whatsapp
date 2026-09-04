@@ -23,16 +23,20 @@ from agent.memory import (
     incrementar_contador_mensajes,
     inicializar_db,
     liberar_evento,
+    limpiar_etapa,
     limpiar_eventos_viejos,
     limpiar_historial,
     limpiar_mensajes_viejos,
     marcar_derivado,
+    marcar_etapa,
     marcar_evento_procesado,
     marcar_ultimo_cliente,
     mensajes_recientes_de,
     obtener_derivacion,
+    obtener_etapa,
     obtener_historial,
     obtener_ultimo_cliente,
+    resetear_todos_los_contadores,
 )
 from agent.providers import obtener_proveedor
 from agent.providers.base import MensajeEntrante
@@ -79,6 +83,9 @@ DIAS_RETENCION_HISTORIAL = int(os.getenv("DIAS_RETENCION_HISTORIAL") or "7")
 # Numero de telefono de pruebas: cada 5 mensajes se reinicia solo, para poder probar
 # el ciclo de derivacion sin llamar a /admin/reiniciar a mano cada vez.
 NUMERO_PRUEBA = os.getenv("NUMERO_PRUEBA") or "5492216737240"
+
+# Cada cuantos mensajes se reinicia solo el NUMERO_PRUEBA (0 = nunca reiniciar).
+CICLO_RESET_PRUEBA = int(os.getenv("CICLO_RESET_PRUEBA") or "5")
 
 
 async def _limpieza_periodica():
@@ -151,9 +158,8 @@ async def admin_desmarcar(telefono: str, key: str):
 @app.post("/admin/reiniciar")
 async def admin_reiniciar(telefono: str, key: str):
     """
-    Borra TODO el historial de conversacion de un numero y lo desmarca, para poder
-    probar de cero (sin esto, el contador de "3 mensajes" sigue contando desde
-    conversaciones anteriores).
+    Borra TODO el historial de conversacion de un numero, lo desmarca, y lo vuelve a
+    poner en el menu principal — para poder probar de cero.
 
     Uso: POST https://tu-dominio/admin/reiniciar?telefono=5491122334455&key=TU_ADMIN_KEY
     """
@@ -164,8 +170,27 @@ async def admin_reiniciar(telefono: str, key: str):
 
     await limpiar_historial(telefono)
     await desmarcar_derivado(telefono)
+    await limpiar_etapa(telefono)
     logger.info(f"Historial reiniciado manualmente: {telefono}")
     return {"status": "ok", "telefono": telefono}
+
+
+@app.post("/admin/reiniciar_contadores")
+async def admin_reiniciar_contadores(key: str):
+    """
+    Vuelve a 0 el contador de mensajes (el de "cada 5 mensajes") de TODOS los
+    telefonos, no solo el numero de pruebas. No toca historial ni derivaciones.
+
+    Uso: POST https://tu-dominio/admin/reiniciar_contadores?key=TU_ADMIN_KEY
+    """
+    if not _ADMIN_KEY:
+        raise HTTPException(status_code=503, detail="ADMIN_KEY no configurada")
+    if key != _ADMIN_KEY:
+        raise HTTPException(status_code=401, detail="Clave incorrecta")
+
+    cantidad = await resetear_todos_los_contadores()
+    logger.info(f"Contadores reiniciados manualmente: {cantidad} numeros")
+    return {"status": "ok", "reiniciados": cantidad}
 
 
 @app.get("/")
@@ -284,15 +309,53 @@ async def webhook_handler(request: Request, tareas: BackgroundTasks):
     return {"status": "ok", "encolados": encolados}
 
 
-MENSAJE_DERIVACION = {
-    "alquiler": "Gracias! Ya te estamos derivando con nuestro equipo de alquileres, en breve te contactan.",
-    "otro": "Gracias! En breve te contacta uno de nuestros asesores.",
+MENUS = {
+    "principal": {
+        "cuerpo": "Hola! Bienvenido a Lado Inmobiliaria. ¿En qué te podemos ayudar?",
+        "boton": "Ver opciones",
+        "opciones": [
+            {"id": "ventas", "titulo": "Ventas"},
+            {"id": "alquileres", "titulo": "Alquileres"},
+            {"id": "tasaciones", "titulo": "Tasaciones"},
+            {"id": "otras", "titulo": "Otras consultas"},
+        ],
+    },
+    "ventas": {
+        "cuerpo": "Perfecto, ¿qué necesitás?",
+        "opciones": [
+            {"id": "consultar_venta", "titulo": "Ver propiedades"},
+            {"id": "otras_venta", "titulo": "Otras consultas"},
+        ],
+    },
+    "alquileres": {
+        "cuerpo": "Perfecto, ¿qué necesitás?",
+        "opciones": [
+            {"id": "consultar_alquiler", "titulo": "Ver propiedades"},
+            {"id": "otras_alquiler", "titulo": "Otras consultas"},
+        ],
+    },
 }
+
+
+async def _enviar_menu_principal(msg: MensajeEntrante):
+    m = MENUS["principal"]
+    await proveedor.enviar_lista(
+        msg.telefono, msg.contexto, m["cuerpo"], m["boton"], [{"titulo": "Opciones", "filas": m["opciones"]}]
+    )
+    await marcar_etapa(msg.telefono, "menu_principal")
+
+
+async def _enviar_submenu(msg: MensajeEntrante, cual: str, etapa: str):
+    m = MENUS[cual]
+    await proveedor.enviar_botones(msg.telefono, msg.contexto, m["cuerpo"], m["opciones"])
+    await marcar_etapa(msg.telefono, etapa)
 
 
 async def procesar_mensaje(msg: MensajeEntrante):
     """
-    Genera la respuesta y la manda de vuelta. Corre fuera del ciclo del webhook.
+    Maneja un mensaje de cliente: el menu de botones primero, y una vez que eligio
+    "ver propiedades" en venta o alquiler, la IA lo ayuda a buscar. Corre fuera del
+    ciclo del webhook.
 
     Se toma un candado por telefono: dos mensajes seguidos del mismo cliente se
     atienden en orden, no en paralelo, para que el historial no se mezcle.
@@ -303,13 +366,14 @@ async def procesar_mensaje(msg: MensajeEntrante):
         try:
             # Numero de pruebas: cuenta CADA mensaje entrante (este cliente derivado o
             # no) y, al llegar a un multiplo de 5, reinicia todo antes de seguir —
-            # asi se puede probar el ciclo completo (3 mensajes -> deriva) una y otra
-            # vez sin llamar a /admin/reiniciar a mano.
+            # asi se puede probar el ciclo completo una y otra vez sin llamar a
+            # /admin/reiniciar a mano.
             if msg.telefono == NUMERO_PRUEBA:
                 total = await incrementar_contador_mensajes(msg.telefono)
-                if total % 5 == 0:
+                if CICLO_RESET_PRUEBA > 0 and total % CICLO_RESET_PRUEBA == 0:
                     await limpiar_historial(msg.telefono)
                     await desmarcar_derivado(msg.telefono)
+                    await limpiar_etapa(msg.telefono)
                     logger.info(f"[PRUEBA] Contador reiniciado para {msg.telefono} en el mensaje #{total}")
 
             derivacion = await obtener_derivacion(msg.telefono)
@@ -318,11 +382,12 @@ async def procesar_mensaje(msg: MensajeEntrante):
                 # Ya esta derivado: el agente no contesta.
                 operador = derivacion["operador"]
                 if operador:
-                    # Categoria "alquiler": el operador se entera de cada mensaje nuevo.
+                    # Categoria "alquiler" (eligio "Otras consultas" en el submenu de
+                    # alquileres): el operador se entera de cada mensaje nuevo.
                     await notificar_operador(operador, msg.telefono, msg.texto)
                     await marcar_ultimo_cliente(operador, msg.telefono)
-                # Categoria "otro" (sin operador): sigue en el numero del bot, lo ves
-                # vos mismo en el inbox — no hay a quien notificar.
+                # Sin operador: el numero del bot queda en manual, lo atendes vos —
+                # no hay a quien notificar.
                 logger.info(f"Mensaje de {msg.telefono} en modo derivado (sin respuesta de IA)")
                 return
 
@@ -349,57 +414,92 @@ async def procesar_mensaje(msg: MensajeEntrante):
                 await marcar_derivado(msg.telefono, "otro", "")
                 return
 
-            # Conversacion normal: la IA tiene hasta 3 mensajes propios para entender que
-            # necesita el cliente. Contamos cuantas respuestas de bot hubo ya, para avisarle
-            # cuando esta llegando al limite.
-            historial = await obtener_historial(msg.telefono)
-            turnos_previos = sum(1 for m in historial if m["role"] == "assistant")
-            turno_limite = turnos_previos + 1 >= 3
+            etapa = await obtener_etapa(msg.telefono)
 
-            respuesta, es_respuesta_real, derivacion_ia = await generar_respuesta(
-                msg.texto, historial, turno_limite=turno_limite
-            )
-
-            if derivacion_ia is None and turno_limite:
-                # Red de seguridad: si llegamos al 3er mensaje y la IA no llamo al tool
-                # de derivar igual, forzamos la derivacion nosotros (categoria "otro",
-                # no se pudo entender que necesitaba en 3 mensajes).
-                derivacion_ia = {"categoria": "otro", "resumen": "No se pudo determinar en 3 mensajes"}
-                logger.warning(f"Turno limite alcanzado sin derivar; se fuerza derivacion para {msg.telefono}")
-
-            if derivacion_ia is not None:
-                categoria = derivacion_ia.get("categoria", "otro")
-                resumen = derivacion_ia.get("resumen", "")
-                operador = operador_para(categoria)
-
-                await marcar_derivado(msg.telefono, categoria, operador)
-                if operador:
-                    await notificar_operador(operador, msg.telefono, resumen or msg.texto)
-                    await marcar_ultimo_cliente(operador, msg.telefono)
-
-                if not respuesta:
-                    respuesta = MENSAJE_DERIVACION[categoria]
-                es_respuesta_real = False  # es el cierre de la conversacion, no se guarda
-
-            enviado = await proveedor.enviar_mensaje(msg.telefono, respuesta, msg.contexto)
-
-            if not enviado:
-                # El evento se marco como procesado ANTES de llegar hasta aca, para que dos
-                # entregas simultaneas no se dupliquen. Si el envio fallo, hay que soltarlo:
-                # si no, el reintento del proveedor se descartaria por duplicado y el cliente
-                # se quedaria sin respuesta para siempre.
-                logger.error(f"No se pudo enviar la respuesta a {msg.telefono}; se libera el evento")
-                await liberar_evento(evento_id)
+            # ── Sin etapa todavia: primer contacto, mandamos el menu principal ──
+            if etapa is None:
+                await _enviar_menu_principal(msg)
                 return
 
-            # Solo se guarda en el historial lo que de verdad es conversacion. Los avisos
-            # tecnicos ("estoy teniendo problemas") no son un turno del agente: guardarlos
-            # los deja contaminando el contexto de todos los mensajes que vengan despues.
-            if es_respuesta_real:
-                await guardar_mensaje(msg.telefono, "user", msg.texto)
-                await guardar_mensaje(msg.telefono, "assistant", respuesta)
+            # ── Esperando la eleccion del menu principal ──
+            if etapa == "menu_principal":
+                eleccion = msg.texto.strip().lower()
+                if eleccion == "ventas":
+                    await _enviar_submenu(msg, "ventas", "menu_ventas")
+                elif eleccion == "alquileres":
+                    await _enviar_submenu(msg, "alquileres", "menu_alquileres")
+                elif eleccion in ("tasaciones", "otras"):
+                    await marcar_derivado(msg.telefono, "otro", "")
+                    await limpiar_etapa(msg.telefono)
+                    logger.info(f"{msg.telefono} eligio {eleccion}: numero del bot pasa a manual")
+                else:
+                    await _enviar_menu_principal(msg)  # no se entendio, reenviamos el menu
+                return
 
-            logger.info(f"Respuesta enviada a {msg.telefono}: {respuesta}")
+            # ── Esperando la eleccion del submenu de Ventas ──
+            if etapa == "menu_ventas":
+                eleccion = msg.texto.strip().lower()
+                if eleccion == "consultar_venta":
+                    await marcar_etapa(msg.telefono, "ia_venta")
+                    nota = "El cliente ya eligio: busca propiedades EN VENTA. Ayudalo a buscar."
+                    respuesta, es_respuesta_real = await generar_respuesta(
+                        "Quiero ver propiedades en venta", [], nota_sistema=nota
+                    )
+                    await proveedor.enviar_mensaje(msg.telefono, respuesta, msg.contexto)
+                    if es_respuesta_real:
+                        await guardar_mensaje(msg.telefono, "assistant", respuesta)
+                elif eleccion == "otras_venta":
+                    await marcar_derivado(msg.telefono, "otro", "")
+                    await limpiar_etapa(msg.telefono)
+                    logger.info(f"{msg.telefono} eligio otras consultas (ventas): numero del bot pasa a manual")
+                else:
+                    await _enviar_submenu(msg, "ventas", "menu_ventas")
+                return
+
+            # ── Esperando la eleccion del submenu de Alquileres ──
+            if etapa == "menu_alquileres":
+                eleccion = msg.texto.strip().lower()
+                if eleccion == "consultar_alquiler":
+                    await marcar_etapa(msg.telefono, "ia_alquiler")
+                    nota = "El cliente ya eligio: busca propiedades EN ALQUILER. Ayudalo a buscar."
+                    respuesta, es_respuesta_real = await generar_respuesta(
+                        "Quiero ver propiedades en alquiler", [], nota_sistema=nota
+                    )
+                    await proveedor.enviar_mensaje(msg.telefono, respuesta, msg.contexto)
+                    if es_respuesta_real:
+                        await guardar_mensaje(msg.telefono, "assistant", respuesta)
+                elif eleccion == "otras_alquiler":
+                    operador = operador_para("alquiler")
+                    await marcar_derivado(msg.telefono, "alquiler", operador)
+                    await limpiar_etapa(msg.telefono)
+                    await notificar_operador(operador, msg.telefono, "Otras consultas de alquiler (elegido por menu)")
+                    await marcar_ultimo_cliente(operador, msg.telefono)
+                    logger.info(f"{msg.telefono} eligio otras consultas (alquileres): pasa al operador")
+                else:
+                    await _enviar_submenu(msg, "alquileres", "menu_alquileres")
+                return
+
+            # ── La IA ya esta ayudando a buscar (venta o alquiler) ──
+            if etapa in ("ia_venta", "ia_alquiler"):
+                historial = await obtener_historial(msg.telefono)
+                respuesta, es_respuesta_real = await generar_respuesta(msg.texto, historial)
+
+                enviado = await proveedor.enviar_mensaje(msg.telefono, respuesta, msg.contexto)
+                if not enviado:
+                    # El evento se marco como procesado ANTES de llegar hasta aca, para que
+                    # dos entregas simultaneas no se dupliquen. Si el envio fallo, hay que
+                    # soltarlo: si no, el reintento del proveedor se descartaria por
+                    # duplicado y el cliente se quedaria sin respuesta para siempre.
+                    logger.error(f"No se pudo enviar la respuesta a {msg.telefono}; se libera el evento")
+                    await liberar_evento(evento_id)
+                    return
+
+                if es_respuesta_real:
+                    await guardar_mensaje(msg.telefono, "user", msg.texto)
+                    await guardar_mensaje(msg.telefono, "assistant", respuesta)
+
+                logger.info(f"Respuesta enviada a {msg.telefono}: {respuesta}")
+                return
 
         except Exception as e:  # noqa: BLE001
             logger.exception(f"Error procesando el mensaje de {msg.telefono}: {e}")

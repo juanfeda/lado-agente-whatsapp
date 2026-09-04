@@ -75,27 +75,6 @@ HERRAMIENTAS = [
             },
         },
     },
-    {
-        "name": "derivar_conversacion",
-        "description": (
-            "Llamala cuando ya entendiste que necesita el cliente y hay que pasarlo a "
-            "atencion humana, O cuando llevas 3 mensajes tuyos en esta conversacion y "
-            "todavia no lograste entender que necesita. Categoria 'alquiler' si la "
-            "consulta es sobre alquilar una propiedad; 'otro' para cualquier otra cosa "
-            "(venta, tasacion, administracion, soporte, o si no quedo claro)."
-        ),
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "categoria": {"type": "string", "enum": ["alquiler", "otro"]},
-                "resumen": {
-                    "type": "string",
-                    "description": "Resumen breve (1-2 lineas) de lo que necesita el cliente, para el humano que lo va a atender",
-                },
-            },
-            "required": ["categoria", "resumen"],
-        },
-    },
 ]
 
 
@@ -123,11 +102,19 @@ def cargar_config_prompts() -> dict:
         return {}
 
 
-def cargar_system_prompt() -> str:
-    """El system prompt: quien es el agente y que sabe del negocio."""
-    return cargar_config_prompts().get(
+def cargar_system_prompt(nota_extra: str = "") -> str:
+    """
+    El system prompt: quien es el agente y que sabe del negocio.
+
+    "nota_extra" es un contexto puntual que se agrega al final (ej: "el cliente ya
+    eligio que busca propiedades en VENTA"), sin tener que editar el yaml.
+    """
+    texto = cargar_config_prompts().get(
         "system_prompt", "Eres un asistente util. Responde siempre en espanol."
     )
+    if nota_extra:
+        texto += f"\n\n## Contexto de esta conversacion\n{nota_extra}"
+    return texto
 
 
 def obtener_mensaje_error() -> str:
@@ -171,79 +158,35 @@ def _es_error_de_esfuerzo(error: Exception) -> bool:
     return "output_config" in texto or "effort" in texto
 
 
-_PROMPT_CLASIFICACION = (
-    "Sos un clasificador para una inmobiliaria. Dado el mensaje de un cliente por WhatsApp, "
-    "respondé con UNA sola palabra, sin puntuacion ni explicacion:\n"
-    "- 'alquiler' si la consulta es sobre alquilar una propiedad (buscar, consultar o "
-    "renovar un alquiler)\n"
-    "- 'otro' para cualquier otra cosa (venta, tasacion, administracion de propiedades, "
-    "soporte, o lo que sea que no sea especificamente alquiler)"
-)
-
-
-async def clasificar_intencion(mensaje: str) -> str:
-    """
-    Clasifica el mensaje de un cliente como 'alquiler' u 'otro'.
-
-    Se usa una llamada aparte y liviana a Claude, separada del system prompt principal,
-    para no mezclar la logica de derivacion con la logica de conversacion.
-    Ante cualquier duda o error, cae a 'otro' (el operador general).
-    """
-    try:
-        respuesta = await client.messages.create(
-            model=MODELO,
-            max_tokens=10,
-            system=_PROMPT_CLASIFICACION,
-            messages=[{"role": "user", "content": mensaje}],
-        )
-    except Exception as e:  # noqa: BLE001
-        logger.error(f"Error clasificando intencion: {e}")
-        return "otro"
-
-    texto = _extraer_texto(respuesta).strip().lower()
-    return "alquiler" if "alquiler" in texto else "otro"
-
-
 async def generar_respuesta(
-    mensaje: str, historial: list[dict], turno_limite: bool = False
-) -> tuple[str, bool, dict | None]:
+    mensaje: str, historial: list[dict], nota_sistema: str = ""
+) -> tuple[str, bool]:
     """
     Genera una respuesta con Claude.
 
     Args:
         mensaje: el mensaje nuevo del cliente
         historial: los mensajes anteriores, [{"role": "user"|"assistant", "content": "..."}]
-        turno_limite: True si esta es la 3ra respuesta del bot en la conversacion — le
-            avisamos a Claude que tiene que concluir y derivar si o si en este mensaje.
+        nota_sistema: contexto puntual para esta llamada (ej: "el cliente eligio que
+            busca propiedades en VENTA"), se agrega al system prompt.
 
     Returns:
-        (texto, es_respuesta_real, derivacion)
+        (texto, es_respuesta_real)
 
         "es_respuesta_real" es False cuando lo que se devuelve es un aviso tecnico
         (error o fallback) y no una respuesta del agente. main.py lo usa para no
         guardar esos avisos en el historial: si se guardaran, quedarian contaminando
         el contexto de todos los mensajes siguientes.
-
-        "derivacion" es None si la conversacion sigue normal, o
-        {"categoria": "alquiler"|"otro", "resumen": str} si Claude decidio (o el
-        limite de 3 mensajes obligo a) derivar a atencion humana.
     """
     global _soporta_esfuerzo
 
     if not mensaje or len(mensaje.strip()) < 2:
-        return obtener_mensaje_fallback(), False, None
+        return obtener_mensaje_fallback(), False
 
     mensajes = [{"role": m["role"], "content": m["content"]} for m in historial]
-    contenido_usuario = mensaje
-    if turno_limite:
-        contenido_usuario += (
-            "\n\n[SISTEMA: esta es tu 3ra respuesta en esta conversacion. Si todavia no "
-            "sabes que necesita el cliente, llama a derivar_conversacion con categoria "
-            "'otro' igual — no sigas preguntando.]"
-        )
-    mensajes.append({"role": "user", "content": contenido_usuario})
+    mensajes.append({"role": "user", "content": mensaje})
 
-    system_prompt = cargar_system_prompt()
+    system_prompt = cargar_system_prompt(nota_sistema)
     extras = {"output_config": {"effort": ESFUERZO}} if (_soporta_esfuerzo and ESFUERZO) else {}
 
     async def _llamar(parametros_extra: dict):
@@ -268,31 +211,17 @@ async def generar_respuesta(
                 respuesta = await _llamar({})
             except Exception as e2:  # noqa: BLE001
                 logger.error(f"Error llamando a Claude: {e2}")
-                return obtener_mensaje_error(), False, None
+                return obtener_mensaje_error(), False
         else:
             logger.error(f"Error llamando a Claude: {e}")
-            return obtener_mensaje_error(), False, None
+            return obtener_mensaje_error(), False
 
-    # Loop de tool use: mientras Claude pida usar una herramienta, la ejecutamos y le
-    # devolvemos el resultado, hasta un maximo de vueltas para no colgar la respuesta
-    # de WhatsApp si algo entra en bucle. derivar_conversacion es especial: corta el
-    # loop de una, no se le devuelve resultado porque no hay nada mas que conversar.
+    # Loop de tool use: mientras Claude pida usar una herramienta (buscar_propiedades),
+    # la ejecutamos y le devolvemos el resultado, hasta un maximo de vueltas para no
+    # colgar la respuesta de WhatsApp si algo entra en bucle.
     vueltas = 0
-    derivacion = None
     while getattr(respuesta, "stop_reason", None) == "tool_use" and vueltas < 4:
         vueltas += 1
-
-        llamada_derivar = next(
-            (b for b in respuesta.content if b.type == "tool_use" and b.name == "derivar_conversacion"), None
-        )
-        if llamada_derivar is not None:
-            derivacion = {
-                "categoria": llamada_derivar.input.get("categoria", "otro"),
-                "resumen": llamada_derivar.input.get("resumen", ""),
-            }
-            logger.info(f"Claude decidio derivar: {derivacion}")
-            break
-
         mensajes.append({"role": "assistant", "content": respuesta.content})
 
         resultados_tools = []
@@ -315,7 +244,7 @@ async def generar_respuesta(
             respuesta = await _llamar(parametros_extra)
         except Exception as e:  # noqa: BLE001
             logger.error(f"Error llamando a Claude durante el tool use: {e}")
-            return obtener_mensaje_error(), False, None
+            return obtener_mensaje_error(), False
 
     if getattr(respuesta, "stop_reason", None) == "max_tokens":
         logger.warning(
@@ -324,14 +253,12 @@ async def generar_respuesta(
         )
 
     texto = _extraer_texto(respuesta)
-    if not texto and derivacion is None:
+    if not texto:
         logger.warning("Claude devolvio una respuesta sin texto")
-        return obtener_mensaje_fallback(), False, None
+        return obtener_mensaje_fallback(), False
 
     logger.info(
         f"Respuesta generada con {MODELO} "
         f"({respuesta.usage.input_tokens} in / {respuesta.usage.output_tokens} out)"
     )
-    # Si Claude derivo, "texto" puede venir vacio (llamo al tool sin agregar nada mas);
-    # en ese caso no hay nada para guardar en el historial del cliente.
-    return texto, bool(texto) and derivacion is None, derivacion
+    return texto, True

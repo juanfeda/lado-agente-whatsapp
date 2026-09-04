@@ -154,10 +154,19 @@ class ProveedorZernio(ProveedorWhatsApp):
 
         cuenta = payload.get("account") or {}
 
+        # Si el cliente toco un boton o una fila de una lista, el texto libre viene
+        # vacio — lo que importa es el "id" que nosotros le pusimos a esa opcion al
+        # mandar el menu. Lo usamos como si fuera el texto del mensaje, asi el resto
+        # del codigo (que compara contra ids como "ventas", "alquileres", etc.) no
+        # tiene que saber nada de interactivos.
+        metadata = mensaje.get("metadata") or {}
+        interactive_id = metadata.get("interactiveId") or metadata.get("interactive_id") or ""
+        texto = interactive_id or (mensaje.get("text") or "")
+
         return [
             MensajeEntrante(
                 telefono=telefono,
-                texto=mensaje.get("text") or "",
+                texto=texto,
                 mensaje_id=mensaje.get("platformMessageId") or mensaje.get("id") or "",
                 es_propio=False,  # ya filtramos los salientes arriba
                 contexto={
@@ -174,6 +183,56 @@ class ProveedorZernio(ProveedorWhatsApp):
         self, telefono: str, mensaje: str, contexto: dict | None = None
     ) -> bool:
         """Responde dentro de la conversacion que abrio el cliente."""
+        return await self._enviar_payload(contexto, {"message": mensaje})
+
+    async def enviar_lista(
+        self, telefono: str, contexto: dict | None, cuerpo: str, boton: str, secciones: list[dict]
+    ) -> bool:
+        """
+        Manda un mensaje de lista de WhatsApp (hasta 10 filas). Usalo para menus con
+        mas de 3 opciones. "secciones" es una lista de {"titulo": str, "filas": [{"id":
+        str, "titulo": str, "descripcion": str opcional}]}.
+        """
+        interactive = {
+            "type": "list",
+            "body": {"text": cuerpo},
+            "action": {
+                "button": boton[:20],
+                "sections": [
+                    {
+                        "title": s.get("titulo", "")[:24],
+                        "rows": [
+                            {
+                                "id": f["id"],
+                                "title": f["titulo"][:24],
+                                **({"description": f["descripcion"][:72]} if f.get("descripcion") else {}),
+                            }
+                            for f in s.get("filas", [])
+                        ],
+                    }
+                    for s in secciones
+                ],
+            },
+        }
+        return await self._enviar_payload(contexto, {"interactive": interactive})
+
+    async def enviar_botones(
+        self, telefono: str, contexto: dict | None, cuerpo: str, opciones: list[dict]
+    ) -> bool:
+        """
+        Manda un mensaje con hasta 3 botones de respuesta rapida. "opciones" es una
+        lista de {"id": str, "titulo": str}.
+        """
+        return await self._enviar_payload(
+            contexto,
+            {
+                "message": cuerpo,
+                "buttons": [{"id": o["id"], "title": o["titulo"][:20]} for o in opciones[:3]],
+            },
+        )
+
+    async def _enviar_payload(self, contexto: dict | None, extra: dict) -> bool:
+        """Logica compartida de envio: arma la request, la manda, y registra el ID propio."""
         contexto = contexto or {}
         conversation_id = contexto.get("conversation_id")
         account_id = contexto.get("account_id") or self.account_id
@@ -197,13 +256,11 @@ class ProveedorZernio(ProveedorWhatsApp):
         if evento_id:
             headers["Idempotency-Key"] = f"agentkit-{evento_id}"
 
+        payload = {"accountId": account_id, **extra}
+
         try:
             async with httpx.AsyncClient(timeout=30.0) as cliente:
-                r = await cliente.post(
-                    url,
-                    json={"accountId": account_id, "message": mensaje},
-                    headers=headers,
-                )
+                r = await cliente.post(url, json=payload, headers=headers)
         except httpx.HTTPError as e:
             logger.error(f"Error de red hablando con Zernio: {e}")
             return False

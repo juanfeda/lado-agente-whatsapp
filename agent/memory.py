@@ -96,6 +96,47 @@ class ConversacionDerivada(Base):
     activo: Mapped[bool] = mapped_column(Boolean, default=True)
 
 
+class EstadoMenu(Base):
+    """
+    En que etapa del menu de botones esta cada cliente. Etapas posibles:
+      menu_principal   -> se le mando el menu Ventas/Alquileres/Tasaciones/Otras
+      menu_ventas      -> se le mando el submenu de Ventas
+      menu_alquileres  -> se le mando el submenu de Alquileres
+      ia_venta         -> la IA lo esta ayudando a buscar propiedades EN VENTA
+      ia_alquiler      -> la IA lo esta ayudando a buscar propiedades EN ALQUILER
+    Cuando el cliente queda derivado (ConversacionDerivada), esta tabla ya no importa.
+    """
+
+    __tablename__ = "estado_menu"
+
+    telefono: Mapped[str] = mapped_column(String(50), primary_key=True)
+    etapa: Mapped[str] = mapped_column(String(30))
+    actualizado_en: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=ahora)
+
+
+async def marcar_etapa(telefono: str, etapa: str):
+    """Guarda en que etapa del menu esta este cliente."""
+    async with async_session() as session:
+        await session.execute(delete(EstadoMenu).where(EstadoMenu.telefono == telefono))
+        session.add(EstadoMenu(telefono=telefono, etapa=etapa, actualizado_en=ahora()))
+        await session.commit()
+
+
+async def obtener_etapa(telefono: str) -> str | None:
+    """La etapa actual del menu para este cliente, o None si todavia no empezo."""
+    async with async_session() as session:
+        resultado = await session.execute(select(EstadoMenu).where(EstadoMenu.telefono == telefono))
+        fila = resultado.scalar_one_or_none()
+    return fila.etapa if fila else None
+
+
+async def limpiar_etapa(telefono: str):
+    """Borra la etapa del menu de este cliente (para /admin/reiniciar)."""
+    async with async_session() as session:
+        await session.execute(delete(EstadoMenu).where(EstadoMenu.telefono == telefono))
+        await session.commit()
+
+
 class UltimoClientePorOperador(Base):
     """
     Ultimo cliente que se le notifico a cada operador. Sirve para que /tomo y /listo
@@ -261,6 +302,14 @@ async def resetear_contador_mensajes(telefono: str):
     async with async_session() as session:
         await session.execute(delete(ContadorMensajes).where(ContadorMensajes.telefono == telefono))
         await session.commit()
+
+
+async def resetear_todos_los_contadores() -> int:
+    """Vuelve a 0 el contador de mensajes de TODOS los telefonos. Retorna cuantos se borraron."""
+    async with async_session() as session:
+        resultado = await session.execute(delete(ContadorMensajes))
+        await session.commit()
+    return resultado.rowcount
 
 
 async def inicializar_db():

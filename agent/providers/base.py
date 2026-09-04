@@ -42,6 +42,18 @@ class ProveedorWhatsApp(ABC):
         """Envia un mensaje de texto. Retorna True si salio bien."""
         ...
 
+    async def enviar_lista(
+        self, telefono: str, contexto: dict | None, cuerpo: str, boton: str, secciones: list[dict]
+    ) -> bool:
+        """Envia un menu de lista (hasta 10 opciones). Solo implementado por Zernio."""
+        raise NotImplementedError(f"{self.__class__.__name__} no soporta mensajes de lista")
+
+    async def enviar_botones(
+        self, telefono: str, contexto: dict | None, cuerpo: str, opciones: list[dict]
+    ) -> bool:
+        """Envia hasta 3 botones de respuesta rapida. Solo implementado por Zernio."""
+        raise NotImplementedError(f"{self.__class__.__name__} no soporta botones")
+
     async def verificar_firma(self, request: Request) -> bool:
         """
         Confirma que el webhook viene de verdad del proveedor.
