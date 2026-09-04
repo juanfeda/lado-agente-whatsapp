@@ -135,6 +135,11 @@ app = FastAPI(title="AgentKit — WhatsApp AI Agent", version="2.0.0", lifespan=
 _ADMIN_KEY = os.getenv("ADMIN_KEY", "")
 
 
+def _limpiar_telefono(telefono: str) -> str:
+    """Deja solo digitos: saca +, espacios, guiones, parentesis, etc."""
+    return "".join(c for c in telefono if c.isdigit())
+
+
 @app.post("/admin/tomar")
 async def admin_tomar(telefono: str, key: str):
     """
@@ -149,6 +154,7 @@ async def admin_tomar(telefono: str, key: str):
     if key != _ADMIN_KEY:
         raise HTTPException(status_code=401, detail="Clave incorrecta")
 
+    telefono = _limpiar_telefono(telefono)
     await marcar_derivado(telefono, "otro", "")
     await limpiar_etapa(telefono)
     logger.info(f"{telefono} tomado manualmente via /admin/tomar (para escribirle desde la app)")
@@ -168,6 +174,7 @@ async def admin_desmarcar(telefono: str, key: str):
     if key != _ADMIN_KEY:
         raise HTTPException(status_code=401, detail="Clave incorrecta")
 
+    telefono = _limpiar_telefono(telefono)
     await desmarcar_derivado(telefono)
     logger.info(f"Desmarcado manualmente: {telefono}")
     return {"status": "ok", "telefono": telefono}
@@ -187,6 +194,7 @@ async def admin_estado(telefono: str, key: str):
     if key != _ADMIN_KEY:
         raise HTTPException(status_code=401, detail="Clave incorrecta")
 
+    telefono = _limpiar_telefono(telefono)
     derivacion = await obtener_derivacion(telefono)
     etapa = await obtener_etapa(telefono)
     ultima = await obtener_ultima_actividad(telefono)
@@ -213,6 +221,7 @@ async def admin_reiniciar(telefono: str, key: str):
     if key != _ADMIN_KEY:
         raise HTTPException(status_code=401, detail="Clave incorrecta")
 
+    telefono = _limpiar_telefono(telefono)
     await limpiar_historial(telefono)
     await desmarcar_derivado(telefono)
     await limpiar_etapa(telefono)
@@ -262,8 +271,10 @@ const KEY = {key!r};
 const out = document.getElementById('resultado');
 
 async function llamar(path, metodo) {{
-  const tel = document.getElementById('telefono').value.trim();
+  const crudo = document.getElementById('telefono').value.trim();
+  const tel = crudo.replace(/[^0-9]/g, ''); // solo digitos: saca +, espacios, guiones, etc.
   if (!tel) {{ out.textContent = 'Escribi un telefono primero.'; return; }}
+  document.getElementById('telefono').value = tel; // se ve limpio en el campo tambien
   out.textContent = 'Enviando...';
   try {{
     const r = await fetch(`${{path}}?telefono=${{encodeURIComponent(tel)}}&key=${{encodeURIComponent(KEY)}}`, {{method: metodo}});
@@ -273,6 +284,12 @@ async function llamar(path, metodo) {{
     out.textContent = 'Error: ' + e;
   }}
 }}
+
+const campoTelefono = document.getElementById('telefono');
+campoTelefono.addEventListener('input', () => {{
+  const limpio = campoTelefono.value.replace(/[^0-9]/g, '');
+  if (limpio !== campoTelefono.value) campoTelefono.value = limpio;
+}});
 
 document.getElementById('tomar').onclick = () => llamar('/admin/tomar', 'POST');
 document.getElementById('listo').onclick = () => llamar('/admin/desmarcar', 'POST');
