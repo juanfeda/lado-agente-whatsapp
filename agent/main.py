@@ -428,7 +428,7 @@ async def procesar_mensaje(msg: MensajeEntrante):
                     await _enviar_submenu(msg, "ventas", "menu_ventas")
                 elif eleccion == "alquileres":
                     await _enviar_submenu(msg, "alquileres", "menu_alquileres")
-                elif eleccion in ("tasaciones", "otras"):
+                elif eleccion in ("tasaciones", "otras", "otras consultas"):
                     await marcar_derivado(msg.telefono, "otro", "")
                     await limpiar_etapa(msg.telefono)
                     logger.info(f"{msg.telefono} eligio {eleccion}: numero del bot pasa a manual")
@@ -439,7 +439,7 @@ async def procesar_mensaje(msg: MensajeEntrante):
             # ── Esperando la eleccion del submenu de Ventas ──
             if etapa == "menu_ventas":
                 eleccion = msg.texto.strip().lower()
-                if eleccion == "consultar_venta":
+                if eleccion in ("consultar_venta", "ver propiedades"):
                     await marcar_etapa(msg.telefono, "ia_venta")
                     nota = "El cliente ya eligio: busca propiedades EN VENTA. Ayudalo a buscar."
                     respuesta, es_respuesta_real = await generar_respuesta(
@@ -448,7 +448,7 @@ async def procesar_mensaje(msg: MensajeEntrante):
                     await proveedor.enviar_mensaje(msg.telefono, respuesta, msg.contexto)
                     if es_respuesta_real:
                         await guardar_mensaje(msg.telefono, "assistant", respuesta)
-                elif eleccion == "otras_venta":
+                elif eleccion in ("otras_venta", "otras consultas"):
                     await marcar_derivado(msg.telefono, "otro", "")
                     await limpiar_etapa(msg.telefono)
                     logger.info(f"{msg.telefono} eligio otras consultas (ventas): numero del bot pasa a manual")
@@ -459,7 +459,7 @@ async def procesar_mensaje(msg: MensajeEntrante):
             # ── Esperando la eleccion del submenu de Alquileres ──
             if etapa == "menu_alquileres":
                 eleccion = msg.texto.strip().lower()
-                if eleccion == "consultar_alquiler":
+                if eleccion in ("consultar_alquiler", "ver propiedades"):
                     await marcar_etapa(msg.telefono, "ia_alquiler")
                     nota = "El cliente ya eligio: busca propiedades EN ALQUILER. Ayudalo a buscar."
                     respuesta, es_respuesta_real = await generar_respuesta(
@@ -468,7 +468,7 @@ async def procesar_mensaje(msg: MensajeEntrante):
                     await proveedor.enviar_mensaje(msg.telefono, respuesta, msg.contexto)
                     if es_respuesta_real:
                         await guardar_mensaje(msg.telefono, "assistant", respuesta)
-                elif eleccion == "otras_alquiler":
+                elif eleccion in ("otras_alquiler", "otras consultas"):
                     operador = operador_para("alquiler")
                     await marcar_derivado(msg.telefono, "alquiler", operador)
                     await limpiar_etapa(msg.telefono)
