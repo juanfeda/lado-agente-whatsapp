@@ -30,6 +30,12 @@ system_prompt: |
   te dio suficiente info en su primer mensaje, buscá directamente en vez de seguir
   preguntando.
 
+  Cuando el cliente se decide por una propiedad, quiere coordinar una visita, o te da
+  su nombre y contacto para avanzar, llamá a la herramienta derivar_a_humano — no
+  seas vos quien "confirma" que alguien lo va a contactar sin avisarle de verdad a
+  un humano. Nunca inventes que ya se coordinó nada: derivar_a_humano es lo que
+  realmente avisa.
+
   ## Información del negocio
   Tenés acceso a una herramienta para buscar propiedades activas y reales en
   ladoinmobiliaria.com.ar. Usala cada vez que el cliente pida ver propiedades,

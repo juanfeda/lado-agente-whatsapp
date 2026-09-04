@@ -75,6 +75,26 @@ HERRAMIENTAS = [
             },
         },
     },
+    {
+        "name": "derivar_a_humano",
+        "description": (
+            "Llamala cuando el cliente ya esta listo para que un humano continue: te dio "
+            "nombre y un contacto (telefono o mail), quiere coordinar una visita, avanzar "
+            "con una propiedad puntual, o pidio explicitamente hablar con alguien del "
+            "equipo. Pasale un resumen breve con la propiedad de interes (si la hay), "
+            "nombre y contacto del cliente."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "resumen": {
+                    "type": "string",
+                    "description": "Resumen para el humano que va a seguir: propiedad de interes, nombre y contacto del cliente",
+                },
+            },
+            "required": ["resumen"],
+        },
+    },
 ]
 
 
@@ -160,7 +180,7 @@ def _es_error_de_esfuerzo(error: Exception) -> bool:
 
 async def generar_respuesta(
     mensaje: str, historial: list[dict], nota_sistema: str = ""
-) -> tuple[str, bool]:
+) -> tuple[str, bool, str | None]:
     """
     Genera una respuesta con Claude.
 
@@ -171,17 +191,21 @@ async def generar_respuesta(
             busca propiedades en VENTA"), se agrega al system prompt.
 
     Returns:
-        (texto, es_respuesta_real)
+        (texto, es_respuesta_real, resumen_derivar)
 
         "es_respuesta_real" es False cuando lo que se devuelve es un aviso tecnico
         (error o fallback) y no una respuesta del agente. main.py lo usa para no
         guardar esos avisos en el historial: si se guardaran, quedarian contaminando
         el contexto de todos los mensajes siguientes.
+
+        "resumen_derivar" es None si la conversacion sigue normal, o un string con el
+        resumen que arma Claude cuando llama a derivar_a_humano (el cliente ya esta
+        listo para que un humano siga).
     """
     global _soporta_esfuerzo
 
     if not mensaje or len(mensaje.strip()) < 2:
-        return obtener_mensaje_fallback(), False
+        return obtener_mensaje_fallback(), False, None
 
     mensajes = [{"role": m["role"], "content": m["content"]} for m in historial]
     mensajes.append({"role": "user", "content": mensaje})
@@ -211,17 +235,28 @@ async def generar_respuesta(
                 respuesta = await _llamar({})
             except Exception as e2:  # noqa: BLE001
                 logger.error(f"Error llamando a Claude: {e2}")
-                return obtener_mensaje_error(), False
+                return obtener_mensaje_error(), False, None
         else:
             logger.error(f"Error llamando a Claude: {e}")
-            return obtener_mensaje_error(), False
+            return obtener_mensaje_error(), False, None
 
-    # Loop de tool use: mientras Claude pida usar una herramienta (buscar_propiedades),
-    # la ejecutamos y le devolvemos el resultado, hasta un maximo de vueltas para no
-    # colgar la respuesta de WhatsApp si algo entra en bucle.
+    # Loop de tool use: mientras Claude pida usar una herramienta, la ejecutamos y le
+    # devolvemos el resultado, hasta un maximo de vueltas para no colgar la respuesta
+    # de WhatsApp si algo entra en bucle. derivar_a_humano es especial: corta el loop
+    # de una, no hace falta seguir conversando despues de eso.
     vueltas = 0
+    resumen_derivar = None
     while getattr(respuesta, "stop_reason", None) == "tool_use" and vueltas < 4:
         vueltas += 1
+
+        llamada_derivar = next(
+            (b for b in respuesta.content if b.type == "tool_use" and b.name == "derivar_a_humano"), None
+        )
+        if llamada_derivar is not None:
+            resumen_derivar = llamada_derivar.input.get("resumen", "")
+            logger.info(f"Claude decidio derivar a un humano: {resumen_derivar}")
+            break
+
         mensajes.append({"role": "assistant", "content": respuesta.content})
 
         resultados_tools = []
@@ -244,7 +279,7 @@ async def generar_respuesta(
             respuesta = await _llamar(parametros_extra)
         except Exception as e:  # noqa: BLE001
             logger.error(f"Error llamando a Claude durante el tool use: {e}")
-            return obtener_mensaje_error(), False
+            return obtener_mensaje_error(), False, None
 
     if getattr(respuesta, "stop_reason", None) == "max_tokens":
         logger.warning(
@@ -253,12 +288,12 @@ async def generar_respuesta(
         )
 
     texto = _extraer_texto(respuesta)
-    if not texto:
+    if not texto and resumen_derivar is None:
         logger.warning("Claude devolvio una respuesta sin texto")
-        return obtener_mensaje_fallback(), False
+        return obtener_mensaje_fallback(), False, None
 
     logger.info(
         f"Respuesta generada con {MODELO} "
         f"({respuesta.usage.input_tokens} in / {respuesta.usage.output_tokens} out)"
     )
-    return texto, True
+    return texto, bool(texto) and resumen_derivar is None, resumen_derivar

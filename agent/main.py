@@ -358,6 +358,30 @@ async def _enviar_submenu(msg: MensajeEntrante, cual: str, etapa: str):
     await marcar_etapa(msg.telefono, etapa)
 
 
+async def _derivar_desde_ia(msg: MensajeEntrante, operacion: str, resumen: str, respuesta_ia: str):
+    """
+    La IA (dentro de ia_venta/ia_alquiler) decidio que el cliente ya esta listo para
+    que un humano siga. Alquiler -> avisa al operador. Venta -> queda en manual (lo
+    ves vos en el inbox, no hay a quien mas notificar).
+    """
+    if operacion == "alquiler":
+        operador = operador_para("alquiler")
+        await marcar_derivado(msg.telefono, "alquiler", operador)
+        await notificar_operador(operador, msg.telefono, resumen)
+        await marcar_ultimo_cliente(operador, msg.telefono)
+        logger.info(f"{msg.telefono}: la IA derivo a alquileres — {resumen}")
+    else:
+        await marcar_derivado(msg.telefono, "otro", "")
+        logger.info(f"{msg.telefono}: la IA derivo a manual (venta) — {resumen}")
+
+    await limpiar_etapa(msg.telefono)
+
+    # Si la IA dejo un mensaje de cierre para el cliente, se lo mandamos (no se guarda
+    # en el historial, es el cierre de esta etapa de la conversacion).
+    if respuesta_ia:
+        await proveedor.enviar_mensaje(msg.telefono, respuesta_ia, msg.contexto)
+
+
 async def procesar_mensaje(msg: MensajeEntrante):
     """
     Maneja un mensaje de cliente: el menu de botones primero, y una vez que eligio
@@ -451,9 +475,12 @@ async def procesar_mensaje(msg: MensajeEntrante):
                 if eleccion in ("consultar_venta", "ver propiedades"):
                     await marcar_etapa(msg.telefono, "ia_venta")
                     nota = "El cliente ya eligio: busca propiedades EN VENTA. Ayudalo a buscar."
-                    respuesta, es_respuesta_real = await generar_respuesta(
+                    respuesta, es_respuesta_real, resumen_derivar = await generar_respuesta(
                         "Quiero ver propiedades en venta", [], nota_sistema=nota
                     )
+                    if resumen_derivar is not None:
+                        await _derivar_desde_ia(msg, "venta", resumen_derivar, respuesta)
+                        return
                     await proveedor.enviar_mensaje(msg.telefono, respuesta, msg.contexto)
                     if es_respuesta_real:
                         await guardar_mensaje(msg.telefono, "assistant", respuesta)
@@ -471,9 +498,12 @@ async def procesar_mensaje(msg: MensajeEntrante):
                 if eleccion in ("consultar_alquiler", "ver propiedades"):
                     await marcar_etapa(msg.telefono, "ia_alquiler")
                     nota = "El cliente ya eligio: busca propiedades EN ALQUILER. Ayudalo a buscar."
-                    respuesta, es_respuesta_real = await generar_respuesta(
+                    respuesta, es_respuesta_real, resumen_derivar = await generar_respuesta(
                         "Quiero ver propiedades en alquiler", [], nota_sistema=nota
                     )
+                    if resumen_derivar is not None:
+                        await _derivar_desde_ia(msg, "alquiler", resumen_derivar, respuesta)
+                        return
                     await proveedor.enviar_mensaje(msg.telefono, respuesta, msg.contexto)
                     if es_respuesta_real:
                         await guardar_mensaje(msg.telefono, "assistant", respuesta)
@@ -491,7 +521,13 @@ async def procesar_mensaje(msg: MensajeEntrante):
             # ── La IA ya esta ayudando a buscar (venta o alquiler) ──
             if etapa in ("ia_venta", "ia_alquiler"):
                 historial = await obtener_historial(msg.telefono)
-                respuesta, es_respuesta_real = await generar_respuesta(msg.texto, historial)
+                respuesta, es_respuesta_real, resumen_derivar = await generar_respuesta(msg.texto, historial)
+
+                if resumen_derivar is not None:
+                    operacion = "alquiler" if etapa == "ia_alquiler" else "venta"
+                    await guardar_mensaje(msg.telefono, "user", msg.texto)
+                    await _derivar_desde_ia(msg, operacion, resumen_derivar, respuesta)
+                    return
 
                 enviado = await proveedor.enviar_mensaje(msg.telefono, respuesta, msg.contexto)
                 if not enviado:
