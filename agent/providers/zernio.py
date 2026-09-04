@@ -265,7 +265,7 @@ class ProveedorZernio(ProveedorWhatsApp):
             logger.error(f"Error de red hablando con Zernio: {e}")
             return False
 
-        if r.status_code == 200:
+        if r.status_code in (200, 201):
             # Registramos el ID del mensaje que MANDAMOS NOSOTROS, para poder
             # distinguirlo despues de un mensaje que un humano mande a mano.
             # El campo puede venir de varias formas segun el endpoint; probamos todas.

@@ -148,7 +148,7 @@ async def notificar_operador(operador: str, telefono_cliente: str, mensaje_clien
         logger.error(f"Error de red notificando al operador {operador}: {e}")
         return False
 
-    if r.status_code == 200:
+    if r.status_code in (200, 201):
         logger.info(f"Zernio acepto la notificacion al operador. Respuesta: {r.text[:300]}")
         return True
 
