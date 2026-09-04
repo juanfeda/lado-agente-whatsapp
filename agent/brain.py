@@ -87,12 +87,22 @@ HERRAMIENTAS = [
         "input_schema": {
             "type": "object",
             "properties": {
+                "operacion": {
+                    "type": "string",
+                    "enum": ["venta", "alquiler"],
+                    "description": (
+                        "A que operacion corresponde la consulta que vas a derivar. Usa la "
+                        "operacion REAL de la que termino hablando el cliente, aunque haya "
+                        "arrancado por la otra (ej: empezo preguntando por venta pero termino "
+                        "pidiendo alquilar, ahi va 'alquiler')."
+                    ),
+                },
                 "resumen": {
                     "type": "string",
                     "description": "Resumen para el humano que va a seguir: propiedad de interes, nombre y contacto del cliente",
                 },
             },
-            "required": ["resumen"],
+            "required": ["operacion", "resumen"],
         },
     },
 ]
@@ -180,7 +190,7 @@ def _es_error_de_esfuerzo(error: Exception) -> bool:
 
 async def generar_respuesta(
     mensaje: str, historial: list[dict], nota_sistema: str = ""
-) -> tuple[str, bool, str | None]:
+) -> tuple[str, bool, dict | None]:
     """
     Genera una respuesta con Claude.
 
@@ -191,15 +201,16 @@ async def generar_respuesta(
             busca propiedades en VENTA"), se agrega al system prompt.
 
     Returns:
-        (texto, es_respuesta_real, resumen_derivar)
+        (texto, es_respuesta_real, derivar)
 
         "es_respuesta_real" es False cuando lo que se devuelve es un aviso tecnico
         (error o fallback) y no una respuesta del agente. main.py lo usa para no
         guardar esos avisos en el historial: si se guardaran, quedarian contaminando
         el contexto de todos los mensajes siguientes.
 
-        "resumen_derivar" es None si la conversacion sigue normal, o un string con el
-        resumen que arma Claude cuando llama a derivar_a_humano (el cliente ya esta
+        "derivar" es None si la conversacion sigue normal, o
+        {"operacion": "venta"|"alquiler", "resumen": str} si Claude decidio que el
+        cliente ya esta listo para que un humano siga.
         listo para que un humano siga).
     """
     global _soporta_esfuerzo
@@ -245,7 +256,7 @@ async def generar_respuesta(
     # de WhatsApp si algo entra en bucle. derivar_a_humano es especial: corta el loop
     # de una, no hace falta seguir conversando despues de eso.
     vueltas = 0
-    resumen_derivar = None
+    derivar = None
     while getattr(respuesta, "stop_reason", None) == "tool_use" and vueltas < 4:
         vueltas += 1
 
@@ -253,8 +264,11 @@ async def generar_respuesta(
             (b for b in respuesta.content if b.type == "tool_use" and b.name == "derivar_a_humano"), None
         )
         if llamada_derivar is not None:
-            resumen_derivar = llamada_derivar.input.get("resumen", "")
-            logger.info(f"Claude decidio derivar a un humano: {resumen_derivar}")
+            derivar = {
+                "operacion": llamada_derivar.input.get("operacion", "venta"),
+                "resumen": llamada_derivar.input.get("resumen", ""),
+            }
+            logger.info(f"Claude decidio derivar a un humano: {derivar}")
             break
 
         mensajes.append({"role": "assistant", "content": respuesta.content})
@@ -288,7 +302,7 @@ async def generar_respuesta(
         )
 
     texto = _extraer_texto(respuesta)
-    if not texto and resumen_derivar is None:
+    if not texto and derivar is None:
         logger.warning("Claude devolvio una respuesta sin texto")
         return obtener_mensaje_fallback(), False, None
 
@@ -296,4 +310,4 @@ async def generar_respuesta(
         f"Respuesta generada con {MODELO} "
         f"({respuesta.usage.input_tokens} in / {respuesta.usage.output_tokens} out)"
     )
-    return texto, bool(texto) and resumen_derivar is None, resumen_derivar
+    return texto, bool(texto) and derivar is None, derivar

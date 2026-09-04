@@ -15,7 +15,7 @@ from datetime import timedelta
 
 from dotenv import load_dotenv
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Request
-from fastapi.responses import PlainTextResponse
+from fastapi.responses import HTMLResponse, PlainTextResponse
 
 from agent.brain import generar_respuesta, obtener_mensaje_error
 from agent.memory import (
@@ -135,6 +135,26 @@ app = FastAPI(title="AgentKit — WhatsApp AI Agent", version="2.0.0", lifespan=
 _ADMIN_KEY = os.getenv("ADMIN_KEY", "")
 
 
+@app.post("/admin/tomar")
+async def admin_tomar(telefono: str, key: str):
+    """
+    Marca a un cliente como derivado ANTES de escribirle vos desde la app nativa —
+    asi cuando te responda, el bot ya sabe que no debe mostrarle ningun menu.
+    Pensado para abrirlo desde el navegador del celular (sin depender de WhatsApp).
+
+    Uso: POST https://tu-dominio/admin/tomar?telefono=5491122334455&key=TU_ADMIN_KEY
+    """
+    if not _ADMIN_KEY:
+        raise HTTPException(status_code=503, detail="ADMIN_KEY no configurada")
+    if key != _ADMIN_KEY:
+        raise HTTPException(status_code=401, detail="Clave incorrecta")
+
+    await marcar_derivado(telefono, "otro", "")
+    await limpiar_etapa(telefono)
+    logger.info(f"{telefono} tomado manualmente via /admin/tomar (para escribirle desde la app)")
+    return {"status": "ok", "telefono": telefono}
+
+
 @app.post("/admin/desmarcar")
 async def admin_desmarcar(telefono: str, key: str):
     """
@@ -198,6 +218,69 @@ async def admin_reiniciar(telefono: str, key: str):
     await limpiar_etapa(telefono)
     logger.info(f"Historial reiniciado manualmente: {telefono}")
     return {"status": "ok", "telefono": telefono}
+
+
+@app.get("/admin/panel", response_class=HTMLResponse)
+async def admin_panel(key: str):
+    """
+    Pagina simple para usar desde el celular: escribis el telefono, tocas un boton.
+    Sin URLs largas ni curl. Guardala como acceso directo en la pantalla de inicio:
+    https://tu-dominio/admin/panel?key=TU_ADMIN_KEY
+    """
+    if not _ADMIN_KEY:
+        raise HTTPException(status_code=503, detail="ADMIN_KEY no configurada")
+    if key != _ADMIN_KEY:
+        raise HTTPException(status_code=401, detail="Clave incorrecta")
+
+    return f"""
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Panel del bot</title>
+<style>
+  body {{ font-family: -apple-system, sans-serif; max-width: 420px; margin: 40px auto; padding: 0 16px; }}
+  input {{ width: 100%; font-size: 18px; padding: 12px; margin-bottom: 12px; box-sizing: border-box; }}
+  button {{ width: 100%; font-size: 18px; padding: 14px; margin-bottom: 8px; border: none; border-radius: 8px; color: white; }}
+  #tomar {{ background: #c8102e; }}
+  #listo {{ background: #2e7d32; }}
+  #estado {{ background: #555; }}
+  #resultado {{ margin-top: 16px; padding: 12px; border-radius: 8px; background: #f0f0f0; white-space: pre-wrap; font-size: 14px; }}
+</style>
+</head>
+<body>
+  <h2>Panel del bot</h2>
+  <input id="telefono" type="tel" placeholder="Telefono del cliente (ej: 5491122334455)">
+  <button id="tomar">Tomar (voy a escribirle yo)</button>
+  <button id="listo">Listo (que el bot siga)</button>
+  <button id="estado">Ver estado</button>
+  <div id="resultado"></div>
+
+<script>
+const KEY = {key!r};
+const out = document.getElementById('resultado');
+
+async function llamar(path, metodo) {{
+  const tel = document.getElementById('telefono').value.trim();
+  if (!tel) {{ out.textContent = 'Escribi un telefono primero.'; return; }}
+  out.textContent = 'Enviando...';
+  try {{
+    const r = await fetch(`${{path}}?telefono=${{encodeURIComponent(tel)}}&key=${{encodeURIComponent(KEY)}}`, {{method: metodo}});
+    const j = await r.json();
+    out.textContent = JSON.stringify(j, null, 2);
+  }} catch (e) {{
+    out.textContent = 'Error: ' + e;
+  }}
+}}
+
+document.getElementById('tomar').onclick = () => llamar('/admin/tomar', 'POST');
+document.getElementById('listo').onclick = () => llamar('/admin/desmarcar', 'POST');
+document.getElementById('estado').onclick = () => llamar('/admin/estado', 'GET');
+</script>
+</body>
+</html>
+"""
 
 
 @app.get("/")
@@ -358,28 +441,41 @@ async def _enviar_submenu(msg: MensajeEntrante, cual: str, etapa: str):
     await marcar_etapa(msg.telefono, etapa)
 
 
+MENSAJE_DERIVACION = {
+    "alquiler": "Gracias! Ya te estamos derivando con nuestro equipo de alquileres, en breve te contactan.",
+    "otro": "Gracias! En breve te contacta uno de nuestros asesores.",
+}
+
+
+async def _avisar_y_derivar(msg: MensajeEntrante, categoria: str, operador: str, resumen: str, mensaje_ia: str = ""):
+    """
+    Marca la conversacion como derivada, notifica al operador si corresponde, y
+    SIEMPRE le avisa al cliente que a partir de ahora lo sigue un humano — nunca lo
+    dejamos sin ningun mensaje despues de derivar.
+    """
+    await marcar_derivado(msg.telefono, categoria, operador)
+    await limpiar_etapa(msg.telefono)
+    if operador:
+        await notificar_operador(operador, msg.telefono, resumen or msg.texto)
+        await marcar_ultimo_cliente(operador, msg.telefono)
+
+    texto_cliente = mensaje_ia or MENSAJE_DERIVACION.get(categoria, MENSAJE_DERIVACION["otro"])
+    await proveedor.enviar_mensaje(msg.telefono, texto_cliente, msg.contexto)
+
+
 async def _derivar_desde_ia(msg: MensajeEntrante, operacion: str, resumen: str, respuesta_ia: str):
     """
     La IA (dentro de ia_venta/ia_alquiler) decidio que el cliente ya esta listo para
-    que un humano siga. Alquiler -> avisa al operador. Venta -> queda en manual (lo
-    ves vos en el inbox, no hay a quien mas notificar).
+    que un humano siga. Usa la operacion REAL que devolvio la IA (puede ser distinta
+    a la del menu por el que entro, si el cliente cambio de tema en el medio).
+    Alquiler -> avisa al operador. Venta -> queda en manual (lo ves vos en el inbox).
     """
     if operacion == "alquiler":
-        operador = operador_para("alquiler")
-        await marcar_derivado(msg.telefono, "alquiler", operador)
-        await notificar_operador(operador, msg.telefono, resumen)
-        await marcar_ultimo_cliente(operador, msg.telefono)
+        await _avisar_y_derivar(msg, "alquiler", operador_para("alquiler"), resumen, respuesta_ia)
         logger.info(f"{msg.telefono}: la IA derivo a alquileres — {resumen}")
     else:
-        await marcar_derivado(msg.telefono, "otro", "")
+        await _avisar_y_derivar(msg, "otro", "", resumen, respuesta_ia)
         logger.info(f"{msg.telefono}: la IA derivo a manual (venta) — {resumen}")
-
-    await limpiar_etapa(msg.telefono)
-
-    # Si la IA dejo un mensaje de cierre para el cliente, se lo mandamos (no se guarda
-    # en el historial, es el cierre de esta etapa de la conversacion).
-    if respuesta_ia:
-        await proveedor.enviar_mensaje(msg.telefono, respuesta_ia, msg.contexto)
 
 
 async def procesar_mensaje(msg: MensajeEntrante):
@@ -444,7 +540,7 @@ async def procesar_mensaje(msg: MensajeEntrante):
                     f"Posible bot detectado en {msg.telefono}: {recientes} mensajes "
                     f"en los ultimos {VENTANA_SEGUNDOS}s. Se corta la IA y se deriva."
                 )
-                await marcar_derivado(msg.telefono, "otro", "")
+                await _avisar_y_derivar(msg, "otro", "", "")
                 return
 
             etapa = await obtener_etapa(msg.telefono)
@@ -462,8 +558,7 @@ async def procesar_mensaje(msg: MensajeEntrante):
                 elif eleccion == "alquileres":
                     await _enviar_submenu(msg, "alquileres", "menu_alquileres")
                 elif eleccion in ("tasaciones", "otras", "otras consultas"):
-                    await marcar_derivado(msg.telefono, "otro", "")
-                    await limpiar_etapa(msg.telefono)
+                    await _avisar_y_derivar(msg, "otro", "", f"Eligio {eleccion} en el menu principal")
                     logger.info(f"{msg.telefono} eligio {eleccion}: numero del bot pasa a manual")
                 else:
                     await _enviar_menu_principal(msg)  # no se entendio, reenviamos el menu
@@ -475,18 +570,17 @@ async def procesar_mensaje(msg: MensajeEntrante):
                 if eleccion in ("consultar_venta", "ver propiedades"):
                     await marcar_etapa(msg.telefono, "ia_venta")
                     nota = "El cliente ya eligio: busca propiedades EN VENTA. Ayudalo a buscar."
-                    respuesta, es_respuesta_real, resumen_derivar = await generar_respuesta(
+                    respuesta, es_respuesta_real, derivar = await generar_respuesta(
                         "Quiero ver propiedades en venta", [], nota_sistema=nota
                     )
-                    if resumen_derivar is not None:
-                        await _derivar_desde_ia(msg, "venta", resumen_derivar, respuesta)
+                    if derivar is not None:
+                        await _derivar_desde_ia(msg, derivar["operacion"], derivar["resumen"], respuesta)
                         return
                     await proveedor.enviar_mensaje(msg.telefono, respuesta, msg.contexto)
                     if es_respuesta_real:
                         await guardar_mensaje(msg.telefono, "assistant", respuesta)
                 elif eleccion in ("otras_venta", "otras consultas"):
-                    await marcar_derivado(msg.telefono, "otro", "")
-                    await limpiar_etapa(msg.telefono)
+                    await _avisar_y_derivar(msg, "otro", "", "Eligio Otras consultas en el submenu de Ventas")
                     logger.info(f"{msg.telefono} eligio otras consultas (ventas): numero del bot pasa a manual")
                 else:
                     await _enviar_submenu(msg, "ventas", "menu_ventas")
@@ -498,21 +592,19 @@ async def procesar_mensaje(msg: MensajeEntrante):
                 if eleccion in ("consultar_alquiler", "ver propiedades"):
                     await marcar_etapa(msg.telefono, "ia_alquiler")
                     nota = "El cliente ya eligio: busca propiedades EN ALQUILER. Ayudalo a buscar."
-                    respuesta, es_respuesta_real, resumen_derivar = await generar_respuesta(
+                    respuesta, es_respuesta_real, derivar = await generar_respuesta(
                         "Quiero ver propiedades en alquiler", [], nota_sistema=nota
                     )
-                    if resumen_derivar is not None:
-                        await _derivar_desde_ia(msg, "alquiler", resumen_derivar, respuesta)
+                    if derivar is not None:
+                        await _derivar_desde_ia(msg, derivar["operacion"], derivar["resumen"], respuesta)
                         return
                     await proveedor.enviar_mensaje(msg.telefono, respuesta, msg.contexto)
                     if es_respuesta_real:
                         await guardar_mensaje(msg.telefono, "assistant", respuesta)
                 elif eleccion in ("otras_alquiler", "otras consultas"):
-                    operador = operador_para("alquiler")
-                    await marcar_derivado(msg.telefono, "alquiler", operador)
-                    await limpiar_etapa(msg.telefono)
-                    await notificar_operador(operador, msg.telefono, "Otras consultas de alquiler (elegido por menu)")
-                    await marcar_ultimo_cliente(operador, msg.telefono)
+                    await _avisar_y_derivar(
+                        msg, "alquiler", operador_para("alquiler"), "Otras consultas de alquiler (elegido por menu)"
+                    )
                     logger.info(f"{msg.telefono} eligio otras consultas (alquileres): pasa al operador")
                 else:
                     await _enviar_submenu(msg, "alquileres", "menu_alquileres")
@@ -521,12 +613,11 @@ async def procesar_mensaje(msg: MensajeEntrante):
             # ── La IA ya esta ayudando a buscar (venta o alquiler) ──
             if etapa in ("ia_venta", "ia_alquiler"):
                 historial = await obtener_historial(msg.telefono)
-                respuesta, es_respuesta_real, resumen_derivar = await generar_respuesta(msg.texto, historial)
+                respuesta, es_respuesta_real, derivar = await generar_respuesta(msg.texto, historial)
 
-                if resumen_derivar is not None:
-                    operacion = "alquiler" if etapa == "ia_alquiler" else "venta"
+                if derivar is not None:
                     await guardar_mensaje(msg.telefono, "user", msg.texto)
-                    await _derivar_desde_ia(msg, operacion, resumen_derivar, respuesta)
+                    await _derivar_desde_ia(msg, derivar["operacion"], derivar["resumen"], respuesta)
                     return
 
                 enviado = await proveedor.enviar_mensaje(msg.telefono, respuesta, msg.contexto)
