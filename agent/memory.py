@@ -258,58 +258,50 @@ async def mensajes_recientes_de(telefono: str, segundos: int) -> int:
         return len(resultado.scalars().all())
 
 
-async def contar_mensajes_de(telefono: str) -> int:
-    """Cuenta TODOS los mensajes del cliente (role='user') de este numero, sin limite de tiempo."""
-    async with async_session() as session:
-        resultado = await session.execute(
-            select(Mensaje).where(Mensaje.telefono == telefono, Mensaje.role == "user")
-        )
-        return len(resultado.scalars().all())
-
-
-class ContadorMensajes(Base):
+class UltimaActividad(Base):
     """
-    Cuenta TODOS los mensajes entrantes de un cliente, esten derivados o no — a
-    diferencia de la tabla "mensajes", que solo guarda lo que la IA realmente
-    conversa (nunca lo que llega despues de derivar). Se usa para reglas basadas
-    en "cada N mensajes", como el reinicio automatico del numero de pruebas.
+    Momento del ultimo mensaje entrante de cada cliente, este derivado o no, este en un
+    menu o no. Se usa para reiniciar solo al numero al menu principal despues de 7 dias
+    sin mensajes nuevos.
     """
 
-    __tablename__ = "contador_mensajes"
+    __tablename__ = "ultima_actividad"
 
     telefono: Mapped[str] = mapped_column(String(50), primary_key=True)
-    cantidad: Mapped[int] = mapped_column(Integer, default=0)
+    timestamp: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=ahora)
 
 
-async def incrementar_contador_mensajes(telefono: str) -> int:
-    """Suma 1 al contador de este telefono y devuelve el nuevo total."""
+async def obtener_ultima_actividad(telefono: str) -> datetime | None:
+    """El momento del ultimo mensaje de este cliente, o None si nunca escribio."""
     async with async_session() as session:
         resultado = await session.execute(
-            select(ContadorMensajes).where(ContadorMensajes.telefono == telefono)
+            select(UltimaActividad).where(UltimaActividad.telefono == telefono)
+        )
+        fila = resultado.scalar_one_or_none()
+    if fila is None:
+        return None
+    timestamp = fila.timestamp
+    # SQLite (uso local/pruebas) no siempre preserva la zona horaria al guardar y
+    # devuelve un datetime "naive"; sin esto, restarlo contra ahora() (con zona)
+    # tira TypeError. Postgres (produccion) no tiene este problema, pero cubrimos
+    # los dos casos para no depender de cual base este corriendo.
+    if timestamp.tzinfo is None:
+        timestamp = timestamp.replace(tzinfo=timezone.utc)
+    return timestamp
+
+
+async def marcar_actividad(telefono: str):
+    """Registra que este cliente acaba de escribir ahora."""
+    async with async_session() as session:
+        resultado = await session.execute(
+            select(UltimaActividad).where(UltimaActividad.telefono == telefono)
         )
         fila = resultado.scalar_one_or_none()
         if fila is None:
-            fila = ContadorMensajes(telefono=telefono, cantidad=0)
-            session.add(fila)
-        fila.cantidad += 1
-        nuevo_total = fila.cantidad
+            session.add(UltimaActividad(telefono=telefono, timestamp=ahora()))
+        else:
+            fila.timestamp = ahora()
         await session.commit()
-    return nuevo_total
-
-
-async def resetear_contador_mensajes(telefono: str):
-    """Vuelve el contador de este telefono a 0."""
-    async with async_session() as session:
-        await session.execute(delete(ContadorMensajes).where(ContadorMensajes.telefono == telefono))
-        await session.commit()
-
-
-async def resetear_todos_los_contadores() -> int:
-    """Vuelve a 0 el contador de mensajes de TODOS los telefonos. Retorna cuantos se borraron."""
-    async with async_session() as session:
-        resultado = await session.execute(delete(ContadorMensajes))
-        await session.commit()
-    return resultado.rowcount
 
 
 async def inicializar_db():

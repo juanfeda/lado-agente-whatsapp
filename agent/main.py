@@ -11,6 +11,7 @@ import logging
 import os
 from collections import defaultdict
 from contextlib import asynccontextmanager
+from datetime import timedelta
 
 from dotenv import load_dotenv
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Request
@@ -18,15 +19,16 @@ from fastapi.responses import PlainTextResponse
 
 from agent.brain import generar_respuesta, obtener_mensaje_error
 from agent.memory import (
+    ahora,
     desmarcar_derivado,
     guardar_mensaje,
-    incrementar_contador_mensajes,
     inicializar_db,
     liberar_evento,
     limpiar_etapa,
     limpiar_eventos_viejos,
     limpiar_historial,
     limpiar_mensajes_viejos,
+    marcar_actividad,
     marcar_derivado,
     marcar_etapa,
     marcar_evento_procesado,
@@ -35,8 +37,8 @@ from agent.memory import (
     obtener_derivacion,
     obtener_etapa,
     obtener_historial,
+    obtener_ultima_actividad,
     obtener_ultimo_cliente,
-    resetear_todos_los_contadores,
 )
 from agent.providers import obtener_proveedor
 from agent.providers.base import MensajeEntrante
@@ -80,12 +82,8 @@ estado_proveedor: dict = {"ok": None, "detalle": "sin verificar"}
 
 DIAS_RETENCION_HISTORIAL = int(os.getenv("DIAS_RETENCION_HISTORIAL") or "7")
 
-# Numero de telefono de pruebas: cada 5 mensajes se reinicia solo, para poder probar
-# el ciclo de derivacion sin llamar a /admin/reiniciar a mano cada vez.
-NUMERO_PRUEBA = os.getenv("NUMERO_PRUEBA") or "5492216737240"
-
-# Cada cuantos mensajes se reinicia solo el NUMERO_PRUEBA (0 = nunca reiniciar).
-CICLO_RESET_PRUEBA = int(os.getenv("CICLO_RESET_PRUEBA") or "5")
+# Dias de inactividad de un cliente antes de que vuelva a arrancar del menu principal.
+DIAS_INACTIVIDAD_RESET = int(os.getenv("DIAS_INACTIVIDAD_RESET") or "7")
 
 
 async def _limpieza_periodica():
@@ -173,24 +171,6 @@ async def admin_reiniciar(telefono: str, key: str):
     await limpiar_etapa(telefono)
     logger.info(f"Historial reiniciado manualmente: {telefono}")
     return {"status": "ok", "telefono": telefono}
-
-
-@app.post("/admin/reiniciar_contadores")
-async def admin_reiniciar_contadores(key: str):
-    """
-    Vuelve a 0 el contador de mensajes (el de "cada 5 mensajes") de TODOS los
-    telefonos, no solo el numero de pruebas. No toca historial ni derivaciones.
-
-    Uso: POST https://tu-dominio/admin/reiniciar_contadores?key=TU_ADMIN_KEY
-    """
-    if not _ADMIN_KEY:
-        raise HTTPException(status_code=503, detail="ADMIN_KEY no configurada")
-    if key != _ADMIN_KEY:
-        raise HTTPException(status_code=401, detail="Clave incorrecta")
-
-    cantidad = await resetear_todos_los_contadores()
-    logger.info(f"Contadores reiniciados manualmente: {cantidad} numeros")
-    return {"status": "ok", "reiniciados": cantidad}
 
 
 @app.get("/")
@@ -364,17 +344,19 @@ async def procesar_mensaje(msg: MensajeEntrante):
 
     async with _candados[msg.telefono]:
         try:
-            # Numero de pruebas: cuenta CADA mensaje entrante (este cliente derivado o
-            # no) y, al llegar a un multiplo de 5, reinicia todo antes de seguir —
-            # asi se puede probar el ciclo completo una y otra vez sin llamar a
-            # /admin/reiniciar a mano.
-            if msg.telefono == NUMERO_PRUEBA:
-                total = await incrementar_contador_mensajes(msg.telefono)
-                if CICLO_RESET_PRUEBA > 0 and total % CICLO_RESET_PRUEBA == 0:
-                    await limpiar_historial(msg.telefono)
-                    await desmarcar_derivado(msg.telefono)
-                    await limpiar_etapa(msg.telefono)
-                    logger.info(f"[PRUEBA] Contador reiniciado para {msg.telefono} en el mensaje #{total}")
+            # Si paso mucho tiempo sin que este cliente escriba, arranca de cero con
+            # el menu principal — sea cual sea el estado en el que haya quedado antes
+            # (derivado, en un menu, charlando con la IA).
+            ultima = await obtener_ultima_actividad(msg.telefono)
+            await marcar_actividad(msg.telefono)
+            if ultima is not None and (ahora() - ultima) > timedelta(days=DIAS_INACTIVIDAD_RESET):
+                await limpiar_historial(msg.telefono)
+                await desmarcar_derivado(msg.telefono)
+                await limpiar_etapa(msg.telefono)
+                logger.info(
+                    f"{msg.telefono} sin actividad hace mas de {DIAS_INACTIVIDAD_RESET} dias: "
+                    "vuelve al menu principal"
+                )
 
             derivacion = await obtener_derivacion(msg.telefono)
 
