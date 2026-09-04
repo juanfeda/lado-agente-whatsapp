@@ -520,6 +520,34 @@ async def _derivar_desde_ia(msg: MensajeEntrante, derivar: dict, respuesta_ia: s
     )
 
 
+async def _iniciar_datos_derivacion(msg: MensajeEntrante, operacion_forzada: str, motivo: str):
+    """
+    El cliente eligio "Otras consultas" en algun menu (no busca propiedades). Antes
+    de derivar, la IA tiene que pedirle nombre, apellido y confirmar telefono —
+    igual que en el flujo de busqueda, pero sin buscar_propiedades de por medio.
+    La operacion queda fija segun el menu de origen (no la decide la IA aca).
+    """
+    await marcar_etapa(msg.telefono, f"ia_datos:{operacion_forzada}")
+    nota = (
+        f"El cliente eligio 'Otras consultas' ({motivo}). No busca propiedades — no "
+        "uses buscar_propiedades. Tu unico trabajo ahora es pedirle nombre, apellido, "
+        "y confirmar un telefono de contacto. En cuanto los tengas, llama a "
+        f"verificar_contacto y despues a derivar_a_humano con operacion='{operacion_forzada}' "
+        "y un resumen breve que diga que consulta por un tema distinto a comprar/alquilar."
+    )
+    respuesta, es_respuesta_real, derivar = await generar_respuesta(
+        "El cliente eligio Otras consultas", [], nota_sistema=nota, telefono_cliente=msg.telefono
+    )
+    if derivar is not None:
+        # No deberia pasar en el primer mensaje, pero por las dudas lo cubrimos.
+        derivar["operacion"] = operacion_forzada
+        await _derivar_desde_ia(msg, derivar, respuesta)
+        return
+    await proveedor.enviar_mensaje(msg.telefono, respuesta, msg.contexto)
+    if es_respuesta_real:
+        await guardar_mensaje(msg.telefono, "assistant", respuesta)
+
+
 async def procesar_mensaje(msg: MensajeEntrante):
     """
     Maneja un mensaje de cliente: el menu de botones primero, y una vez que eligio
@@ -600,8 +628,7 @@ async def procesar_mensaje(msg: MensajeEntrante):
                 elif eleccion == "alquileres":
                     await _enviar_submenu(msg, "alquileres", "menu_alquileres")
                 elif eleccion in ("tasaciones", "otras", "otras consultas"):
-                    await _avisar_y_derivar(msg, "otro", "", f"Eligio {eleccion} en el menu principal")
-                    logger.info(f"{msg.telefono} eligio {eleccion}: numero del bot pasa a manual")
+                    await _iniciar_datos_derivacion(msg, "venta", f"eligio {eleccion} en el menu principal")
                 else:
                     await _enviar_menu_principal(msg)  # no se entendio, reenviamos el menu
                 return
@@ -622,8 +649,7 @@ async def procesar_mensaje(msg: MensajeEntrante):
                     if es_respuesta_real:
                         await guardar_mensaje(msg.telefono, "assistant", respuesta)
                 elif eleccion in ("otras_venta", "otras consultas"):
-                    await _avisar_y_derivar(msg, "otro", "", "Eligio Otras consultas en el submenu de Ventas")
-                    logger.info(f"{msg.telefono} eligio otras consultas (ventas): numero del bot pasa a manual")
+                    await _iniciar_datos_derivacion(msg, "venta", "eligio Otras consultas en el submenu de Ventas")
                 else:
                     await _enviar_submenu(msg, "ventas", "menu_ventas")
                 return
@@ -644,10 +670,7 @@ async def procesar_mensaje(msg: MensajeEntrante):
                     if es_respuesta_real:
                         await guardar_mensaje(msg.telefono, "assistant", respuesta)
                 elif eleccion in ("otras_alquiler", "otras consultas"):
-                    await _avisar_y_derivar(
-                        msg, "alquiler", operador_para("alquiler"), "Otras consultas de alquiler (elegido por menu)"
-                    )
-                    logger.info(f"{msg.telefono} eligio otras consultas (alquileres): pasa al operador")
+                    await _iniciar_datos_derivacion(msg, "alquiler", "eligio Otras consultas en el submenu de Alquileres")
                 else:
                     await _enviar_submenu(msg, "alquileres", "menu_alquileres")
                 return
@@ -668,6 +691,31 @@ async def procesar_mensaje(msg: MensajeEntrante):
                     # dos entregas simultaneas no se dupliquen. Si el envio fallo, hay que
                     # soltarlo: si no, el reintento del proveedor se descartaria por
                     # duplicado y el cliente se quedaria sin respuesta para siempre.
+                    logger.error(f"No se pudo enviar la respuesta a {msg.telefono}; se libera el evento")
+                    await liberar_evento(evento_id)
+                    return
+
+                if es_respuesta_real:
+                    await guardar_mensaje(msg.telefono, "user", msg.texto)
+                    await guardar_mensaje(msg.telefono, "assistant", respuesta)
+
+                logger.info(f"Respuesta enviada a {msg.telefono}: {respuesta}")
+                return
+
+            # ── "Otras consultas": la IA solo esta pidiendo nombre/apellido/telefono ──
+            if etapa.startswith("ia_datos:"):
+                operacion_forzada = etapa.split(":", 1)[1]
+                historial = await obtener_historial(msg.telefono)
+                respuesta, es_respuesta_real, derivar = await generar_respuesta(msg.texto, historial, telefono_cliente=msg.telefono)
+
+                if derivar is not None:
+                    derivar["operacion"] = operacion_forzada  # la operacion la definio el menu, no la IA
+                    await guardar_mensaje(msg.telefono, "user", msg.texto)
+                    await _derivar_desde_ia(msg, derivar, respuesta)
+                    return
+
+                enviado = await proveedor.enviar_mensaje(msg.telefono, respuesta, msg.contexto)
+                if not enviado:
                     logger.error(f"No se pudo enviar la respuesta a {msg.telefono}; se libera el evento")
                     await liberar_evento(evento_id)
                     return
