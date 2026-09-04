@@ -42,7 +42,7 @@ from agent.memory import (
 )
 from agent.providers import obtener_proveedor
 from agent.providers.base import MensajeEntrante
-from agent.tools import OPERADOR_ALQUILERES, OPERADOR_OTRO, notificar_operador, operador_para
+from agent.tools import OPERADOR_ALQUILERES, notificar_operador, operador_para
 
 load_dotenv()
 
@@ -241,7 +241,7 @@ async def webhook_handler(request: Request, tareas: BackgroundTasks):
         # de 24hs) no son consultas de clientes. Comandos que entienden:
         #   /tomo <telefono>  -> el bot deja de responderle a ese cliente (lo vas a atender vos a mano)
         #   /listo <telefono> -> el bot vuelve a responderle normal a ese cliente
-        if msg.telefono in (OPERADOR_ALQUILERES, OPERADOR_OTRO):
+        if msg.telefono == OPERADOR_ALQUILERES:
             texto = msg.texto.strip()
             texto_lower = texto.lower()
 
