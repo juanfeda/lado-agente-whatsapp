@@ -96,6 +96,52 @@ async def buscar_propiedades(
         return {"error": "El buscador de propiedades devolvio una respuesta invalida"}
 
 
+# ── Carga de leads en el CRM de Lado ─────────────────────────
+_CRM_API_URL = os.getenv("CRM_API_URL", "")
+_CRM_API_KEY = os.getenv("CRM_API_KEY", "")
+
+
+async def crear_lead_crm(
+    telefono: str,
+    nombre: str = "",
+    tipo: str = "compra",
+    zona: str = "",
+    presupuesto_max: float | None = None,
+    notas: str = "",
+) -> bool:
+    """
+    Carga un lead nuevo en el CRM de ladoinmobiliaria.com.ar via leads_api.php.
+    No frena la conversacion si falla — solo loguea el error.
+    """
+    if not _CRM_API_URL or not _CRM_API_KEY:
+        logger.warning("No se pudo cargar el lead en el CRM: falta CRM_API_URL o CRM_API_KEY")
+        return False
+
+    payload = {
+        "telefono": telefono,
+        "nombre": nombre,
+        "tipo": tipo,
+        "zona_preferida": zona,
+        "notas": notas,
+    }
+    if presupuesto_max is not None:
+        payload["presupuesto_max"] = presupuesto_max
+
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as cliente:
+            r = await cliente.post(_CRM_API_URL, json=payload, headers={"X-Api-Key": _CRM_API_KEY})
+    except httpx.HTTPError as e:
+        logger.error(f"Error cargando lead en el CRM: {e}")
+        return False
+
+    if r.status_code != 200:
+        logger.error(f"leads_api.php respondio {r.status_code}: {r.text[:300]}")
+        return False
+
+    logger.info(f"Lead cargado en el CRM: {r.text[:200]}")
+    return True
+
+
 def operador_para(categoria: str) -> str:
     """
     Devuelve el numero de operador segun la categoria, o "" si no hay operador (categoria

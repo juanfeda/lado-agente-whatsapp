@@ -97,9 +97,19 @@ HERRAMIENTAS = [
                         "pidiendo alquilar, ahi va 'alquiler')."
                     ),
                 },
+                "nombre_cliente": {
+                    "type": "string",
+                    "description": "Nombre del cliente, tal como te lo dio. Vacio si no lo dio.",
+                },
+                "contacto": {
+                    "type": "string",
+                    "description": "Telefono o mail de contacto que dio el cliente (si es distinto de su WhatsApp). Vacio si no dio otro.",
+                },
+                "zona": {"type": "string", "description": "Zona o barrio de interes, si se menciono. Vacio si no."},
+                "presupuesto_max": {"type": "number", "description": "Presupuesto maximo mencionado, si lo hay"},
                 "resumen": {
                     "type": "string",
-                    "description": "Resumen para el humano que va a seguir: propiedad de interes, nombre y contacto del cliente",
+                    "description": "Resumen para el humano que va a seguir: propiedad de interes y contexto de la consulta",
                 },
             },
             "required": ["operacion", "resumen"],
@@ -267,6 +277,10 @@ async def generar_respuesta(
             derivar = {
                 "operacion": llamada_derivar.input.get("operacion", "venta"),
                 "resumen": llamada_derivar.input.get("resumen", ""),
+                "nombre_cliente": llamada_derivar.input.get("nombre_cliente", ""),
+                "contacto": llamada_derivar.input.get("contacto", ""),
+                "zona": llamada_derivar.input.get("zona", ""),
+                "presupuesto_max": llamada_derivar.input.get("presupuesto_max"),
             }
             logger.info(f"Claude decidio derivar a un humano: {derivar}")
             break

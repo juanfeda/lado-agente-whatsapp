@@ -42,7 +42,7 @@ from agent.memory import (
 )
 from agent.providers import obtener_proveedor
 from agent.providers.base import MensajeEntrante
-from agent.tools import OPERADOR_ALQUILERES, notificar_operador, operador_para
+from agent.tools import OPERADOR_ALQUILERES, crear_lead_crm, notificar_operador, operador_para
 
 load_dotenv()
 
@@ -264,6 +264,7 @@ async def admin_panel(key: str):
   <button id="tomar">Tomar (voy a escribirle yo)</button>
   <button id="listo">Listo (que el bot siga)</button>
   <button id="estado">Ver estado</button>
+  <button id="reiniciar" style="background:#8e24aa;">Reiniciar (borra todo, empieza de cero)</button>
   <div id="resultado"></div>
 
 <script>
@@ -294,6 +295,11 @@ campoTelefono.addEventListener('input', () => {{
 document.getElementById('tomar').onclick = () => llamar('/admin/tomar', 'POST');
 document.getElementById('listo').onclick = () => llamar('/admin/desmarcar', 'POST');
 document.getElementById('estado').onclick = () => llamar('/admin/estado', 'GET');
+document.getElementById('reiniciar').onclick = () => {{
+  if (confirm('Esto borra el historial y la derivacion de este cliente. Seguro?')) {{
+    llamar('/admin/reiniciar', 'POST');
+  }}
+}};
 </script>
 </body>
 </html>
@@ -480,19 +486,33 @@ async def _avisar_y_derivar(msg: MensajeEntrante, categoria: str, operador: str,
     await proveedor.enviar_mensaje(msg.telefono, texto_cliente, msg.contexto)
 
 
-async def _derivar_desde_ia(msg: MensajeEntrante, operacion: str, resumen: str, respuesta_ia: str):
+async def _derivar_desde_ia(msg: MensajeEntrante, derivar: dict, respuesta_ia: str):
     """
     La IA (dentro de ia_venta/ia_alquiler) decidio que el cliente ya esta listo para
     que un humano siga. Usa la operacion REAL que devolvio la IA (puede ser distinta
     a la del menu por el que entro, si el cliente cambio de tema en el medio).
     Alquiler -> avisa al operador. Venta -> queda en manual (lo ves vos en el inbox).
+    Ademas, carga el lead en el CRM con los datos que junto la IA.
     """
+    operacion = derivar.get("operacion", "venta")
+    resumen = derivar.get("resumen", "")
+
     if operacion == "alquiler":
         await _avisar_y_derivar(msg, "alquiler", operador_para("alquiler"), resumen, respuesta_ia)
         logger.info(f"{msg.telefono}: la IA derivo a alquileres — {resumen}")
     else:
         await _avisar_y_derivar(msg, "otro", "", resumen, respuesta_ia)
         logger.info(f"{msg.telefono}: la IA derivo a manual (venta) — {resumen}")
+
+    tipo_crm = "alquiler" if operacion == "alquiler" else "compra"
+    await crear_lead_crm(
+        telefono=msg.telefono,
+        nombre=derivar.get("nombre_cliente", ""),
+        tipo=tipo_crm,
+        zona=derivar.get("zona", ""),
+        presupuesto_max=derivar.get("presupuesto_max"),
+        notas=resumen,
+    )
 
 
 async def procesar_mensaje(msg: MensajeEntrante):
@@ -591,7 +611,7 @@ async def procesar_mensaje(msg: MensajeEntrante):
                         "Quiero ver propiedades en venta", [], nota_sistema=nota
                     )
                     if derivar is not None:
-                        await _derivar_desde_ia(msg, derivar["operacion"], derivar["resumen"], respuesta)
+                        await _derivar_desde_ia(msg, derivar, respuesta)
                         return
                     await proveedor.enviar_mensaje(msg.telefono, respuesta, msg.contexto)
                     if es_respuesta_real:
@@ -613,7 +633,7 @@ async def procesar_mensaje(msg: MensajeEntrante):
                         "Quiero ver propiedades en alquiler", [], nota_sistema=nota
                     )
                     if derivar is not None:
-                        await _derivar_desde_ia(msg, derivar["operacion"], derivar["resumen"], respuesta)
+                        await _derivar_desde_ia(msg, derivar, respuesta)
                         return
                     await proveedor.enviar_mensaje(msg.telefono, respuesta, msg.contexto)
                     if es_respuesta_real:
@@ -634,7 +654,7 @@ async def procesar_mensaje(msg: MensajeEntrante):
 
                 if derivar is not None:
                     await guardar_mensaje(msg.telefono, "user", msg.texto)
-                    await _derivar_desde_ia(msg, derivar["operacion"], derivar["resumen"], respuesta)
+                    await _derivar_desde_ia(msg, derivar, respuesta)
                     return
 
                 enviado = await proveedor.enviar_mensaje(msg.telefono, respuesta, msg.contexto)
