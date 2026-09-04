@@ -520,6 +520,25 @@ async def _derivar_desde_ia(msg: MensajeEntrante, derivar: dict, respuesta_ia: s
     )
 
 
+def _nota_recolectar_datos() -> str:
+    """
+    Instruccion fija para el flujo de "Otras consultas": el UNICO objetivo es juntar
+    nombre, apellido y telefono, sin pedir nada mas. Se reusa en cada turno de esta
+    etapa (no solo en el primer mensaje), para que la instruccion no se pierda.
+    """
+    return (
+        "El cliente eligio 'Otras consultas' — no busca propiedades, no uses "
+        "buscar_propiedades, y NO le preguntes de que se trata su consulta ni "
+        "ningun otro dato. Tu UNICO trabajo es conseguir nombre, apellido y "
+        "confirmar un telefono de contacto (su WhatsApp sirve, preguntale si "
+        "prefiere otro). Apenas tengas los 3 datos, llama a verificar_contacto. Si "
+        "el contacto ya existia con otros datos, preguntale si los actualiza. En "
+        "cuanto esto este resuelto, llama a derivar_a_humano de una — no sigas "
+        "conversando ni pidas mas informacion. Para el campo resumen, poné "
+        "simplemente 'Otras consultas', no inventes ni preguntes un motivo."
+    )
+
+
 async def _iniciar_datos_derivacion(msg: MensajeEntrante, operacion_forzada: str, motivo: str):
     """
     El cliente eligio "Otras consultas" en algun menu (no busca propiedades). Antes
@@ -528,19 +547,13 @@ async def _iniciar_datos_derivacion(msg: MensajeEntrante, operacion_forzada: str
     La operacion queda fija segun el menu de origen (no la decide la IA aca).
     """
     await marcar_etapa(msg.telefono, f"ia_datos:{operacion_forzada}")
-    nota = (
-        f"El cliente eligio 'Otras consultas' ({motivo}). No busca propiedades — no "
-        "uses buscar_propiedades. Tu unico trabajo ahora es pedirle nombre, apellido, "
-        "y confirmar un telefono de contacto. En cuanto los tengas, llama a "
-        f"verificar_contacto y despues a derivar_a_humano con operacion='{operacion_forzada}' "
-        "y un resumen breve que diga que consulta por un tema distinto a comprar/alquilar."
-    )
     respuesta, es_respuesta_real, derivar = await generar_respuesta(
-        "El cliente eligio Otras consultas", [], nota_sistema=nota, telefono_cliente=msg.telefono
+        "El cliente eligio Otras consultas", [], nota_sistema=_nota_recolectar_datos(), telefono_cliente=msg.telefono
     )
     if derivar is not None:
         # No deberia pasar en el primer mensaje, pero por las dudas lo cubrimos.
         derivar["operacion"] = operacion_forzada
+        derivar["resumen"] = "Otras consultas"
         await _derivar_desde_ia(msg, derivar, respuesta)
         return
     await proveedor.enviar_mensaje(msg.telefono, respuesta, msg.contexto)
@@ -706,10 +719,13 @@ async def procesar_mensaje(msg: MensajeEntrante):
             if etapa.startswith("ia_datos:"):
                 operacion_forzada = etapa.split(":", 1)[1]
                 historial = await obtener_historial(msg.telefono)
-                respuesta, es_respuesta_real, derivar = await generar_respuesta(msg.texto, historial, telefono_cliente=msg.telefono)
+                respuesta, es_respuesta_real, derivar = await generar_respuesta(
+                    msg.texto, historial, nota_sistema=_nota_recolectar_datos(), telefono_cliente=msg.telefono
+                )
 
                 if derivar is not None:
                     derivar["operacion"] = operacion_forzada  # la operacion la definio el menu, no la IA
+                    derivar["resumen"] = "Otras consultas"
                     await guardar_mensaje(msg.telefono, "user", msg.texto)
                     await _derivar_desde_ia(msg, derivar, respuesta)
                     return
