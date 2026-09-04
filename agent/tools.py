@@ -89,7 +89,11 @@ async def buscar_propiedades(
         logger.error(f"propiedades_api.php respondio {r.status_code}: {r.text[:200]}")
         return {"error": "El buscador de propiedades respondio con un error"}
 
-    return r.json()
+    try:
+        return r.json()
+    except ValueError:
+        logger.error(f"propiedades_api.php no devolvio JSON valido. Respuesta cruda: {r.text[:500]}")
+        return {"error": "El buscador de propiedades devolvio una respuesta invalida"}
 
 
 def operador_para(categoria: str) -> str:

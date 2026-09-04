@@ -153,6 +153,33 @@ async def admin_desmarcar(telefono: str, key: str):
     return {"status": "ok", "telefono": telefono}
 
 
+@app.get("/admin/estado")
+async def admin_estado(telefono: str, key: str):
+    """
+    Muestra el estado real guardado en la base para un telefono: si esta derivado (y a
+    que operador), en que etapa del menu esta, y su ultima actividad. Para diagnosticar
+    sin adivinar.
+
+    Uso: GET https://tu-dominio/admin/estado?telefono=5491122334455&key=TU_ADMIN_KEY
+    """
+    if not _ADMIN_KEY:
+        raise HTTPException(status_code=503, detail="ADMIN_KEY no configurada")
+    if key != _ADMIN_KEY:
+        raise HTTPException(status_code=401, detail="Clave incorrecta")
+
+    derivacion = await obtener_derivacion(telefono)
+    etapa = await obtener_etapa(telefono)
+    ultima = await obtener_ultima_actividad(telefono)
+
+    return {
+        "telefono": telefono,
+        "derivado": derivacion,
+        "etapa": etapa,
+        "ultima_actividad": ultima.isoformat() if ultima else None,
+        "operador_alquileres_configurado": OPERADOR_ALQUILERES,
+    }
+
+
 @app.post("/admin/reiniciar")
 async def admin_reiniciar(telefono: str, key: str):
     """
