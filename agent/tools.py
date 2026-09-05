@@ -145,10 +145,13 @@ async def crear_lead_crm(
     presupuesto_min: float | None = None,
     presupuesto_max: float | None = None,
     notas: str = "",
+    crear_lead: bool = True,
 ) -> bool:
     """
-    Carga un lead nuevo en el CRM de ladoinmobiliaria.com.ar via leads_api.php. Si el
-    cliente dio nombre + apellido, leads_api.php tambien lo carga en la agenda.
+    Actualiza (o crea) al cliente en la agenda del CRM via leads_api.php. Si
+    crear_lead=True, ademas carga un lead nuevo en crm_leads (usalo solo cuando el
+    cliente estaba buscando propiedades para comprar/alquilar — no para "Otras
+    consultas", donde solo corresponde la agenda).
     No frena la conversacion si falla — solo loguea el error.
     """
     if not _CRM_API_URL or not _CRM_API_KEY:
@@ -163,6 +166,7 @@ async def crear_lead_crm(
         "zona_preferida": zona,
         "tipo_propiedad": tipo_propiedad,
         "notas": notas,
+        "crear_lead": crear_lead,
     }
     if ambientes is not None:
         payload["ambientes"] = ambientes

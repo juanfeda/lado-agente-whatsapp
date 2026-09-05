@@ -486,13 +486,16 @@ async def _avisar_y_derivar(msg: MensajeEntrante, categoria: str, operador: str,
     await proveedor.enviar_mensaje(msg.telefono, texto_cliente, msg.contexto)
 
 
-async def _derivar_desde_ia(msg: MensajeEntrante, derivar: dict, respuesta_ia: str):
+async def _derivar_desde_ia(msg: MensajeEntrante, derivar: dict, respuesta_ia: str, es_busqueda_propiedad: bool = True):
     """
-    La IA (dentro de ia_venta/ia_alquiler) decidio que el cliente ya esta listo para
-    que un humano siga. Usa la operacion REAL que devolvio la IA (puede ser distinta
-    a la del menu por el que entro, si el cliente cambio de tema en el medio).
-    Alquiler -> avisa al operador. Venta -> queda en manual (lo ves vos en el inbox).
-    Ademas, carga el lead en el CRM con los datos que junto la IA.
+    La IA decidio que el cliente ya esta listo para que un humano siga. Usa la
+    operacion REAL que devolvio la IA (puede ser distinta a la del menu por el que
+    entro, si el cliente cambio de tema en el medio). Alquiler -> avisa al operador.
+    Venta -> queda en manual (lo ves vos en el inbox).
+
+    "es_busqueda_propiedad" distingue el origen: True si vino del flujo de "Ver
+    propiedades" (crea un lead ademas de actualizar la agenda), False si vino de
+    "Otras consultas" (solo agenda, sin lead — no estaba buscando comprar/alquilar).
     """
     operacion = derivar.get("operacion", "venta")
     resumen = derivar.get("resumen", "")
@@ -517,6 +520,7 @@ async def _derivar_desde_ia(msg: MensajeEntrante, derivar: dict, respuesta_ia: s
         presupuesto_min=derivar.get("presupuesto_min"),
         presupuesto_max=derivar.get("presupuesto_max"),
         notas=resumen,
+        crear_lead=es_busqueda_propiedad,
     )
 
 
@@ -554,7 +558,7 @@ async def _iniciar_datos_derivacion(msg: MensajeEntrante, operacion_forzada: str
         # No deberia pasar en el primer mensaje, pero por las dudas lo cubrimos.
         derivar["operacion"] = operacion_forzada
         derivar["resumen"] = "Otras consultas"
-        await _derivar_desde_ia(msg, derivar, respuesta)
+        await _derivar_desde_ia(msg, derivar, respuesta, es_busqueda_propiedad=False)
         return
     await proveedor.enviar_mensaje(msg.telefono, respuesta, msg.contexto)
     if es_respuesta_real:
@@ -727,7 +731,7 @@ async def procesar_mensaje(msg: MensajeEntrante):
                     derivar["operacion"] = operacion_forzada  # la operacion la definio el menu, no la IA
                     derivar["resumen"] = "Otras consultas"
                     await guardar_mensaje(msg.telefono, "user", msg.texto)
-                    await _derivar_desde_ia(msg, derivar, respuesta)
+                    await _derivar_desde_ia(msg, derivar, respuesta, es_busqueda_propiedad=False)
                     return
 
                 enviado = await proveedor.enviar_mensaje(msg.telefono, respuesta, msg.contexto)
