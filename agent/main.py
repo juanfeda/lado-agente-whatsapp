@@ -527,19 +527,24 @@ async def _derivar_desde_ia(msg: MensajeEntrante, derivar: dict, respuesta_ia: s
 def _nota_recolectar_datos() -> str:
     """
     Instruccion fija para el flujo de "Otras consultas": el UNICO objetivo es juntar
-    nombre, apellido y telefono, sin pedir nada mas. Se reusa en cada turno de esta
-    etapa (no solo en el primer mensaje), para que la instruccion no se pierda.
+    nombre y apellido, sin pedir nada mas. Se reusa en cada turno de esta etapa (no
+    solo en el primer mensaje), para que la instruccion no se pierda.
     """
     return (
         "El cliente eligio 'Otras consultas' — no busca propiedades, no uses "
         "buscar_propiedades, y NO le preguntes de que se trata su consulta ni "
-        "ningun otro dato. Tu UNICO trabajo es conseguir nombre, apellido y "
-        "confirmar un telefono de contacto (su WhatsApp sirve, preguntale si "
-        "prefiere otro). Apenas tengas los 3 datos, llama a verificar_contacto. Si "
-        "el contacto ya existia con otros datos, preguntale si los actualiza. En "
-        "cuanto esto este resuelto, llama a derivar_a_humano de una — no sigas "
-        "conversando ni pidas mas informacion. Para el campo resumen, poné "
-        "simplemente 'Otras consultas', no inventes ni preguntes un motivo."
+        "ningun otro dato. El telefono de contacto YA LO TENES: es su WhatsApp, no "
+        "hace falta pedirselo ni confirmarselo — usalo directamente como 'contacto' "
+        "al derivar, salvo que el cliente MISMO te diga espontaneamente que prefiere "
+        "otro numero (en ese caso, ahi si usa ese otro). Tu UNICO trabajo es "
+        "conseguir nombre y apellido. Si en su mensaje ya te dio nombre y apellido "
+        "(aunque sea junto con un numero de telefono, o todo en una sola linea), NO "
+        "vuelvas a preguntar nada — segui directo. Apenas tengas nombre y apellido, "
+        "llama a verificar_contacto. Si el contacto ya existia con otros datos, "
+        "preguntale si los actualiza; si no existia o coincide, segui de una. "
+        "Inmediatamente despues, llama a derivar_a_humano — no sigas conversando ni "
+        "pidas mas informacion. Para el campo resumen, poné simplemente 'Otras "
+        "consultas', no inventes ni preguntes un motivo."
     )
 
 
