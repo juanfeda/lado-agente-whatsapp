@@ -80,28 +80,38 @@ class ProveedorZernio(ProveedorWhatsApp):
             return False
         return True
 
-    async def _procesar_mensaje_saliente(self, mensaje: dict, destinatario_hint: dict) -> None:
+    async def _procesar_mensaje_saliente(self, mensaje: dict, conversacion: dict) -> None:
         """
         Chequea un mensaje SALIENTE (mandado desde el numero del bot, por cualquier via)
         y, si no lo mando el propio bot, marca esa conversacion como derivada en silencio.
 
-        Se llama tanto para el evento message.sent como para un message.received que
-        venga marcado como saliente (eco de un mensaje mandado desde la app nativa).
+        Zernio confirmo el campo real: message.metadata.source es "whatsapp_business_app"
+        cuando lo mandaste vos desde la app (Coexistence), o "cloud_api" cuando salio por
+        la API (nuestro bot, o un humano contestando desde el inbox de Zernio). En el caso
+        "cloud_api" hace falta el chequeo de ID propio para distinguir bot vs humano; en
+        "whatsapp_business_app" ya sabemos seguro que fuiste vos a mano, sin mas vueltas.
+
+        El telefono del cliente sale de conversation.participantId (no de message.recipient/
+        to, que no existen en el payload real).
         """
-        message_id = mensaje.get("platformMessageId") or mensaje.get("id") or ""
-        if not message_id or await es_mensaje_propio(message_id):
-            return  # lo mando el bot, no hacer nada
+        metadata = mensaje.get("metadata") or {}
+        origen = metadata.get("source", "")
+        es_de_la_app = origen == "whatsapp_business_app"
 
-        telefono = ""
-        if isinstance(destinatario_hint, dict):
-            telefono = (destinatario_hint.get("phoneNumber") or destinatario_hint.get("id") or "")
-        elif isinstance(destinatario_hint, str):
-            telefono = destinatario_hint
-        telefono = telefono.lstrip("+")
+        if not es_de_la_app:
+            message_id = mensaje.get("platformMessageId") or mensaje.get("id") or ""
+            if not message_id or await es_mensaje_propio(message_id):
+                return  # lo mando el bot, no hacer nada
 
+        telefono = (conversacion.get("participantId") or "").lstrip("+")
         if telefono:
             await marcar_derivado(telefono, "otro", operador_para("otro"))
-            logger.info(f"Mensaje manual detectado hacia {telefono}: el bot deja de responderle")
+            logger.info(
+                f"Mensaje manual detectado hacia {telefono} (origen={origen or 'desconocido'}): "
+                "el bot deja de responderle"
+            )
+        else:
+            logger.warning("Mensaje saliente detectado como manual, pero sin participantId para saber a quien")
 
     async def parsear_webhook(self, request: Request) -> list[MensajeEntrante]:
         """Normaliza el evento message.received de Zernio."""
@@ -119,8 +129,8 @@ class ProveedorZernio(ProveedorWhatsApp):
         if evento == "message.sent":
             mensaje = payload.get("message") or {}
             if mensaje.get("platform") == "whatsapp":
-                destinatario = mensaje.get("recipient") or mensaje.get("to") or {}
-                await self._procesar_mensaje_saliente(mensaje, destinatario)
+                conversacion = payload.get("conversation") or {}
+                await self._procesar_mensaje_saliente(mensaje, conversacion)
             return []
 
         if evento != "message.received":
@@ -145,11 +155,8 @@ class ProveedorZernio(ProveedorWhatsApp):
         if es_saliente:
             # Eco de un mensaje mandado desde la app nativa con el numero del bot:
             # llega como "message.received" pero en realidad es saliente hacia el cliente.
-            # Aca "sender" en realidad describe al negocio, no al cliente — el destinatario
-            # (el cliente) suele venir en "recipient"/"to"; si no esta, no hay forma de saber
-            # a quien va y se ignora.
-            destinatario = mensaje.get("recipient") or mensaje.get("to") or remitente
-            await self._procesar_mensaje_saliente(mensaje, destinatario)
+            conversacion = payload.get("conversation") or {}
+            await self._procesar_mensaje_saliente(mensaje, conversacion)
             return []
 
         cuenta = payload.get("account") or {}
