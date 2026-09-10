@@ -17,7 +17,7 @@ from dotenv import load_dotenv
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, PlainTextResponse
 
-from agent.brain import generar_respuesta, obtener_mensaje_error
+from agent.brain import clasificar_primer_mensaje, generar_respuesta, obtener_mensaje_error
 from agent.memory import (
     ahora,
     desmarcar_derivado,
@@ -422,46 +422,22 @@ async def webhook_handler(request: Request, tareas: BackgroundTasks):
     return {"status": "ok", "encolados": encolados}
 
 
-MENUS = {
-    "principal": {
-        "cuerpo": "Hola! Bienvenido a Lado Inmobiliaria. ¿En qué te podemos ayudar?",
-        "boton": "Ver opciones",
-        "opciones": [
-            {"id": "ventas", "titulo": "Ventas"},
-            {"id": "alquileres", "titulo": "Alquileres"},
-            {"id": "tasaciones", "titulo": "Tasaciones"},
-            {"id": "otras", "titulo": "Otras consultas"},
-        ],
-    },
-    "ventas": {
-        "cuerpo": "Perfecto, ¿qué necesitás?",
-        "opciones": [
-            {"id": "consultar_venta", "titulo": "Ver propiedades"},
-            {"id": "otras_venta", "titulo": "Otras consultas"},
-        ],
-    },
-    "alquileres": {
-        "cuerpo": "Perfecto, ¿qué necesitás?",
-        "opciones": [
-            {"id": "consultar_alquiler", "titulo": "Ver propiedades"},
-            {"id": "otras_alquiler", "titulo": "Otras consultas"},
-        ],
-    },
-}
-
-
-async def _enviar_menu_principal(msg: MensajeEntrante):
-    m = MENUS["principal"]
-    await proveedor.enviar_lista(
-        msg.telefono, msg.contexto, m["cuerpo"], m["boton"], [{"titulo": "Opciones", "filas": m["opciones"]}]
-    )
-    await marcar_etapa(msg.telefono, "menu_principal")
-
-
-async def _enviar_submenu(msg: MensajeEntrante, cual: str, etapa: str):
-    m = MENUS[cual]
-    await proveedor.enviar_botones(msg.telefono, msg.contexto, m["cuerpo"], m["opciones"])
+async def _iniciar_busqueda(msg: MensajeEntrante, operacion: str, mensaje_cliente: str):
+    """
+    Arranca la busqueda de propiedades con la IA para "operacion" (venta o alquiler).
+    """
+    etapa = "ia_alquiler" if operacion == "alquiler" else "ia_venta"
     await marcar_etapa(msg.telefono, etapa)
+    nota = f"El cliente ya eligio: busca propiedades EN {operacion.upper()}. Ayudalo a buscar."
+    respuesta, es_respuesta_real, derivar = await generar_respuesta(
+        mensaje_cliente, [], nota_sistema=nota, telefono_cliente=msg.telefono
+    )
+    if derivar is not None:
+        await _derivar_desde_ia(msg, derivar, respuesta)
+        return
+    await proveedor.enviar_mensaje(msg.telefono, respuesta, msg.contexto)
+    if es_respuesta_real:
+        await guardar_mensaje(msg.telefono, "assistant", respuesta)
 
 
 MENSAJE_DERIVACION = {
@@ -637,64 +613,21 @@ async def procesar_mensaje(msg: MensajeEntrante):
 
             etapa = await obtener_etapa(msg.telefono)
 
-            # ── Sin etapa todavia: primer contacto, mandamos el menu principal ──
+            # ── Sin etapa todavia: primer contacto. Sin menu: se clasifica el
+            # mensaje para decidir si la IA puede ayudar a buscar, o si hay que
+            # derivar directo a un humano. ──
             if etapa is None:
-                await _enviar_menu_principal(msg)
-                return
-
-            # ── Esperando la eleccion del menu principal ──
-            if etapa == "menu_principal":
-                eleccion = msg.texto.strip().lower()
-                if eleccion == "ventas":
-                    await _enviar_submenu(msg, "ventas", "menu_ventas")
-                elif eleccion == "alquileres":
-                    await _enviar_submenu(msg, "alquileres", "menu_alquileres")
-                elif eleccion in ("tasaciones", "otras", "otras consultas"):
-                    await _iniciar_datos_derivacion(msg, "venta", f"eligio {eleccion} en el menu principal")
+                categoria = await clasificar_primer_mensaje(msg.texto)
+                if categoria == "busca_venta":
+                    await _iniciar_busqueda(msg, "venta", msg.texto)
+                elif categoria == "busca_alquiler":
+                    await _iniciar_busqueda(msg, "alquiler", msg.texto)
+                elif categoria == "otro_alquiler":
+                    # Es sobre alquileres pero no es buscar una propiedad (ya alquila,
+                    # quiere renovar, etc.) — pasa directo al operador de alquileres.
+                    await _iniciar_datos_derivacion(msg, "alquiler", "consulta de alquiler fuera de busqueda de propiedades")
                 else:
-                    await _enviar_menu_principal(msg)  # no se entendio, reenviamos el menu
-                return
-
-            # ── Esperando la eleccion del submenu de Ventas ──
-            if etapa == "menu_ventas":
-                eleccion = msg.texto.strip().lower()
-                if eleccion in ("consultar_venta", "ver propiedades"):
-                    await marcar_etapa(msg.telefono, "ia_venta")
-                    nota = "El cliente ya eligio: busca propiedades EN VENTA. Ayudalo a buscar."
-                    respuesta, es_respuesta_real, derivar = await generar_respuesta(
-                        "Quiero ver propiedades en venta", [], nota_sistema=nota, telefono_cliente=msg.telefono
-                    )
-                    if derivar is not None:
-                        await _derivar_desde_ia(msg, derivar, respuesta)
-                        return
-                    await proveedor.enviar_mensaje(msg.telefono, respuesta, msg.contexto)
-                    if es_respuesta_real:
-                        await guardar_mensaje(msg.telefono, "assistant", respuesta)
-                elif eleccion in ("otras_venta", "otras consultas"):
-                    await _iniciar_datos_derivacion(msg, "venta", "eligio Otras consultas en el submenu de Ventas")
-                else:
-                    await _enviar_submenu(msg, "ventas", "menu_ventas")
-                return
-
-            # ── Esperando la eleccion del submenu de Alquileres ──
-            if etapa == "menu_alquileres":
-                eleccion = msg.texto.strip().lower()
-                if eleccion in ("consultar_alquiler", "ver propiedades"):
-                    await marcar_etapa(msg.telefono, "ia_alquiler")
-                    nota = "El cliente ya eligio: busca propiedades EN ALQUILER. Ayudalo a buscar."
-                    respuesta, es_respuesta_real, derivar = await generar_respuesta(
-                        "Quiero ver propiedades en alquiler", [], nota_sistema=nota, telefono_cliente=msg.telefono
-                    )
-                    if derivar is not None:
-                        await _derivar_desde_ia(msg, derivar, respuesta)
-                        return
-                    await proveedor.enviar_mensaje(msg.telefono, respuesta, msg.contexto)
-                    if es_respuesta_real:
-                        await guardar_mensaje(msg.telefono, "assistant", respuesta)
-                elif eleccion in ("otras_alquiler", "otras consultas"):
-                    await _iniciar_datos_derivacion(msg, "alquiler", "eligio Otras consultas en el submenu de Alquileres")
-                else:
-                    await _enviar_submenu(msg, "alquileres", "menu_alquileres")
+                    await _iniciar_datos_derivacion(msg, "venta", "consulta fuera del alcance de la IA")
                 return
 
             # ── La IA ya esta ayudando a buscar (venta o alquiler) ──

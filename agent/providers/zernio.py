@@ -357,7 +357,7 @@ class ProveedorZernio(ProveedorWhatsApp):
             async with httpx.AsyncClient(timeout=15.0) as cliente:
                 r = await cliente.get(
                     url,
-                    params={"order": "asc", "limit": 1},
+                    params={"accountId": self.account_id, "sortOrder": "asc", "limit": 1},
                     headers={"Authorization": f"Bearer {self.api_key}"},
                 )
         except httpx.HTTPError as e:
@@ -365,7 +365,7 @@ class ProveedorZernio(ProveedorWhatsApp):
             return False
 
         if r.status_code != 200:
-            logger.warning(f"Zernio respondio {r.status_code} chequeando la conversacion")
+            logger.warning(f"Zernio respondio {r.status_code} chequeando la conversacion: {r.text[:300]}")
             return False
 
         mensajes = r.json().get("data") or r.json().get("messages") or []

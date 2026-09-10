@@ -182,6 +182,44 @@ def cargar_system_prompt(nota_extra: str = "") -> str:
     return texto
 
 
+_PROMPT_CLASIFICACION_INICIAL = (
+    "Sos un clasificador para el primer mensaje de un cliente que le escribe a una "
+    "inmobiliaria por WhatsApp. Respondé con UNA sola palabra, sin puntuacion ni "
+    "explicacion, eligiendo la que mejor describe el mensaje:\n"
+    "- 'busca_venta': quiere buscar/ver/comprar una propiedad en venta\n"
+    "- 'busca_alquiler': quiere buscar/ver/alquilar una propiedad\n"
+    "- 'otro_alquiler': el tema tiene que ver con alquileres pero NO es buscar una "
+    "propiedad para alquilar (ej: ya alquila y tiene un problema, quiere renovar un "
+    "contrato, pregunta por su alquiler actual, etc.)\n"
+    "- 'otro': cualquier otra cosa (tasaciones, administracion, venta que no es "
+    "busqueda de propiedades, soporte, o no queda claro)"
+)
+
+
+async def clasificar_primer_mensaje(mensaje: str) -> str:
+    """
+    Clasifica el primer mensaje de un cliente para decidir si la IA puede ayudarlo a
+    buscar propiedades (venta/alquiler) o si hay que derivar directo a un humano.
+    Ante cualquier duda o error, cae a 'otro' (deriva a manual, el camino mas seguro).
+    """
+    try:
+        respuesta = await client.messages.create(
+            model=MODELO,
+            max_tokens=10,
+            system=_PROMPT_CLASIFICACION_INICIAL,
+            messages=[{"role": "user", "content": mensaje}],
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.error(f"Error clasificando el primer mensaje: {e}")
+        return "otro"
+
+    texto = _extraer_texto(respuesta).strip().lower()
+    for etiqueta in ("busca_venta", "busca_alquiler", "otro_alquiler", "otro"):
+        if etiqueta in texto:
+            return etiqueta
+    return "otro"
+
+
 def obtener_mensaje_error() -> str:
     """Que decirle al cliente cuando algo falla de nuestro lado."""
     return cargar_config_prompts().get(
