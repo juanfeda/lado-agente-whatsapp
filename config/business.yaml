@@ -6,7 +6,7 @@ negocio:
 
 agente:
   nombre: "Lado Inmobiliaria"
-  tono: "empático y cálido"
+  tono: "directo y comercial"
   casos_de_uso:
     - "Responder preguntas frecuentes"
     - "Calificar y atender leads / ventas"
