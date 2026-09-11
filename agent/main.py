@@ -17,7 +17,7 @@ from dotenv import load_dotenv
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, PlainTextResponse
 
-from agent.brain import clasificar_primer_mensaje, generar_respuesta, obtener_mensaje_error
+from agent.brain import generar_respuesta, obtener_mensaje_error
 from agent.memory import (
     ahora,
     desmarcar_derivado,
@@ -422,26 +422,8 @@ async def webhook_handler(request: Request, tareas: BackgroundTasks):
     return {"status": "ok", "encolados": encolados}
 
 
-async def _iniciar_busqueda(msg: MensajeEntrante, operacion: str, mensaje_cliente: str):
-    """
-    Arranca la busqueda de propiedades con la IA para "operacion" (venta o alquiler).
-    """
-    etapa = "ia_alquiler" if operacion == "alquiler" else "ia_venta"
-    await marcar_etapa(msg.telefono, etapa)
-    nota = f"El cliente ya eligio: busca propiedades EN {operacion.upper()}. Ayudalo a buscar."
-    respuesta, es_respuesta_real, derivar = await generar_respuesta(
-        mensaje_cliente, [], nota_sistema=nota, telefono_cliente=msg.telefono
-    )
-    if derivar is not None:
-        await _derivar_desde_ia(msg, derivar, respuesta)
-        return
-    await proveedor.enviar_mensaje(msg.telefono, respuesta, msg.contexto)
-    if es_respuesta_real:
-        await guardar_mensaje(msg.telefono, "assistant", respuesta)
-
-
 MENSAJE_DERIVACION = {
-    "alquiler": "Gracias! Ya te estamos derivando con nuestro equipo de alquileres, en breve te contactan.",
+    "alquiler": "Gracias! Ya te estamos derivando con Nicolás, de nuestro equipo de alquileres. En breve te contacta.",
     "otro": "Gracias! En breve te contacta uno de nuestros asesores.",
 }
 
@@ -462,26 +444,23 @@ async def _avisar_y_derivar(msg: MensajeEntrante, categoria: str, operador: str,
     await proveedor.enviar_mensaje(msg.telefono, texto_cliente, msg.contexto)
 
 
-async def _derivar_desde_ia(msg: MensajeEntrante, derivar: dict, respuesta_ia: str, es_busqueda_propiedad: bool = True):
+async def _derivar_desde_ia(msg: MensajeEntrante, derivar: dict, respuesta_ia: str):
     """
-    La IA decidio que el cliente ya esta listo para que un humano siga. Usa la
-    operacion REAL que devolvio la IA (puede ser distinta a la del menu por el que
-    entro, si el cliente cambio de tema en el medio). Alquiler -> avisa al operador.
-    Venta -> queda en manual (lo ves vos en el inbox).
-
-    "es_busqueda_propiedad" distingue el origen: True si vino del flujo de "Ver
-    propiedades" (crea un lead ademas de actualizar la agenda), False si vino de
-    "Otras consultas" (solo agenda, sin lead — no estaba buscando comprar/alquilar).
+    La IA decidio que el cliente ya esta listo para que un humano siga (sea porque
+    encontro una propiedad, o porque el tema no lo puede resolver ella misma).
+    "alquiler" -> avisa a Nicolas, el operador de alquileres. Cualquier otra cosa
+    -> queda en este mismo numero, atendido directamente (lo ves en el inbox).
+    En los dos casos se carga el lead y la agenda en el CRM con lo que junto la IA.
     """
     operacion = derivar.get("operacion", "venta")
     resumen = derivar.get("resumen", "")
 
     if operacion == "alquiler":
         await _avisar_y_derivar(msg, "alquiler", operador_para("alquiler"), resumen, respuesta_ia)
-        logger.info(f"{msg.telefono}: la IA derivo a alquileres — {resumen}")
+        logger.info(f"{msg.telefono}: la IA derivo a alquileres (Nicolas) — {resumen}")
     else:
         await _avisar_y_derivar(msg, "otro", "", resumen, respuesta_ia)
-        logger.info(f"{msg.telefono}: la IA derivo a manual (venta) — {resumen}")
+        logger.info(f"{msg.telefono}: la IA derivo a manual — {resumen}")
 
     tipo_crm = "alquiler" if operacion == "alquiler" else "compra"
     await crear_lead_crm(
@@ -496,61 +475,15 @@ async def _derivar_desde_ia(msg: MensajeEntrante, derivar: dict, respuesta_ia: s
         presupuesto_min=derivar.get("presupuesto_min"),
         presupuesto_max=derivar.get("presupuesto_max"),
         notas=resumen,
-        crear_lead=es_busqueda_propiedad,
     )
-
-
-def _nota_recolectar_datos() -> str:
-    """
-    Instruccion fija para el flujo de "Otras consultas": el UNICO objetivo es juntar
-    nombre y apellido, sin pedir nada mas. Se reusa en cada turno de esta etapa (no
-    solo en el primer mensaje), para que la instruccion no se pierda.
-    """
-    return (
-        "El cliente eligio 'Otras consultas' — no busca propiedades, no uses "
-        "buscar_propiedades, y NO le preguntes de que se trata su consulta ni "
-        "ningun otro dato. El telefono de contacto YA LO TENES: es su WhatsApp, no "
-        "hace falta pedirselo ni confirmarselo — usalo directamente como 'contacto' "
-        "al derivar, salvo que el cliente MISMO te diga espontaneamente que prefiere "
-        "otro numero (en ese caso, ahi si usa ese otro). Tu UNICO trabajo es "
-        "conseguir nombre y apellido. Si en su mensaje ya te dio nombre y apellido "
-        "(aunque sea junto con un numero de telefono, o todo en una sola linea), NO "
-        "vuelvas a preguntar nada — segui directo. Apenas tengas nombre y apellido, "
-        "llama a verificar_contacto. Si el contacto ya existia con otros datos, "
-        "preguntale si los actualiza; si no existia o coincide, segui de una. "
-        "Inmediatamente despues, llama a derivar_a_humano — no sigas conversando ni "
-        "pidas mas informacion. Para el campo resumen, poné simplemente 'Otras "
-        "consultas', no inventes ni preguntes un motivo."
-    )
-
-
-async def _iniciar_datos_derivacion(msg: MensajeEntrante, operacion_forzada: str, motivo: str):
-    """
-    El cliente eligio "Otras consultas" en algun menu (no busca propiedades). Antes
-    de derivar, la IA tiene que pedirle nombre, apellido y confirmar telefono —
-    igual que en el flujo de busqueda, pero sin buscar_propiedades de por medio.
-    La operacion queda fija segun el menu de origen (no la decide la IA aca).
-    """
-    await marcar_etapa(msg.telefono, f"ia_datos:{operacion_forzada}")
-    respuesta, es_respuesta_real, derivar = await generar_respuesta(
-        "El cliente eligio Otras consultas", [], nota_sistema=_nota_recolectar_datos(), telefono_cliente=msg.telefono
-    )
-    if derivar is not None:
-        # No deberia pasar en el primer mensaje, pero por las dudas lo cubrimos.
-        derivar["operacion"] = operacion_forzada
-        derivar["resumen"] = "Otras consultas"
-        await _derivar_desde_ia(msg, derivar, respuesta, es_busqueda_propiedad=False)
-        return
-    await proveedor.enviar_mensaje(msg.telefono, respuesta, msg.contexto)
-    if es_respuesta_real:
-        await guardar_mensaje(msg.telefono, "assistant", respuesta)
 
 
 async def procesar_mensaje(msg: MensajeEntrante):
     """
-    Maneja un mensaje de cliente: el menu de botones primero, y una vez que eligio
-    "ver propiedades" en venta o alquiler, la IA lo ayuda a buscar. Corre fuera del
-    ciclo del webhook.
+    Maneja un mensaje de cliente conversando con la IA de punta a punta: pregunta
+    que necesita, busca propiedades si corresponde, y deriva a un humano (con los
+    datos ya cargados en el CRM) apenas detecta que no puede resolverlo ella misma.
+    Corre fuera del ciclo del webhook.
 
     Se toma un candado por telefono: dos mensajes seguidos del mismo cliente se
     atienden en orden, no en paralelo, para que el historial no se mezcle.
@@ -612,78 +545,34 @@ async def procesar_mensaje(msg: MensajeEntrante):
                 return
 
             etapa = await obtener_etapa(msg.telefono)
-
-            # ── Sin etapa todavia: primer contacto. Sin menu: se clasifica el
-            # mensaje para decidir si la IA puede ayudar a buscar, o si hay que
-            # derivar directo a un humano. ──
             if etapa is None:
-                categoria = await clasificar_primer_mensaje(msg.texto)
-                if categoria == "busca_venta":
-                    await _iniciar_busqueda(msg, "venta", msg.texto)
-                elif categoria == "busca_alquiler":
-                    await _iniciar_busqueda(msg, "alquiler", msg.texto)
-                elif categoria == "otro_alquiler":
-                    # Es sobre alquileres pero no es buscar una propiedad (ya alquila,
-                    # quiere renovar, etc.) — pasa directo al operador de alquileres.
-                    await _iniciar_datos_derivacion(msg, "alquiler", "consulta de alquiler fuera de busqueda de propiedades")
-                else:
-                    await _iniciar_datos_derivacion(msg, "venta", "consulta fuera del alcance de la IA")
+                await marcar_etapa(msg.telefono, "conversando")
+
+            historial = await obtener_historial(msg.telefono)
+            respuesta, es_respuesta_real, derivar = await generar_respuesta(
+                msg.texto, historial, telefono_cliente=msg.telefono
+            )
+
+            if derivar is not None:
+                await guardar_mensaje(msg.telefono, "user", msg.texto)
+                await _derivar_desde_ia(msg, derivar, respuesta)
                 return
 
-            # ── La IA ya esta ayudando a buscar (venta o alquiler) ──
-            if etapa in ("ia_venta", "ia_alquiler"):
-                historial = await obtener_historial(msg.telefono)
-                respuesta, es_respuesta_real, derivar = await generar_respuesta(msg.texto, historial, telefono_cliente=msg.telefono)
-
-                if derivar is not None:
-                    await guardar_mensaje(msg.telefono, "user", msg.texto)
-                    await _derivar_desde_ia(msg, derivar, respuesta)
-                    return
-
-                enviado = await proveedor.enviar_mensaje(msg.telefono, respuesta, msg.contexto)
-                if not enviado:
-                    # El evento se marco como procesado ANTES de llegar hasta aca, para que
-                    # dos entregas simultaneas no se dupliquen. Si el envio fallo, hay que
-                    # soltarlo: si no, el reintento del proveedor se descartaria por
-                    # duplicado y el cliente se quedaria sin respuesta para siempre.
-                    logger.error(f"No se pudo enviar la respuesta a {msg.telefono}; se libera el evento")
-                    await liberar_evento(evento_id)
-                    return
-
-                if es_respuesta_real:
-                    await guardar_mensaje(msg.telefono, "user", msg.texto)
-                    await guardar_mensaje(msg.telefono, "assistant", respuesta)
-
-                logger.info(f"Respuesta enviada a {msg.telefono}: {respuesta}")
+            enviado = await proveedor.enviar_mensaje(msg.telefono, respuesta, msg.contexto)
+            if not enviado:
+                # El evento se marco como procesado ANTES de llegar hasta aca, para que
+                # dos entregas simultaneas no se dupliquen. Si el envio fallo, hay que
+                # soltarlo: si no, el reintento del proveedor se descartaria por
+                # duplicado y el cliente se quedaria sin respuesta para siempre.
+                logger.error(f"No se pudo enviar la respuesta a {msg.telefono}; se libera el evento")
+                await liberar_evento(evento_id)
                 return
 
-            # ── "Otras consultas": la IA solo esta pidiendo nombre/apellido/telefono ──
-            if etapa.startswith("ia_datos:"):
-                operacion_forzada = etapa.split(":", 1)[1]
-                historial = await obtener_historial(msg.telefono)
-                respuesta, es_respuesta_real, derivar = await generar_respuesta(
-                    msg.texto, historial, nota_sistema=_nota_recolectar_datos(), telefono_cliente=msg.telefono
-                )
+            if es_respuesta_real:
+                await guardar_mensaje(msg.telefono, "user", msg.texto)
+                await guardar_mensaje(msg.telefono, "assistant", respuesta)
 
-                if derivar is not None:
-                    derivar["operacion"] = operacion_forzada  # la operacion la definio el menu, no la IA
-                    derivar["resumen"] = "Otras consultas"
-                    await guardar_mensaje(msg.telefono, "user", msg.texto)
-                    await _derivar_desde_ia(msg, derivar, respuesta, es_busqueda_propiedad=False)
-                    return
-
-                enviado = await proveedor.enviar_mensaje(msg.telefono, respuesta, msg.contexto)
-                if not enviado:
-                    logger.error(f"No se pudo enviar la respuesta a {msg.telefono}; se libera el evento")
-                    await liberar_evento(evento_id)
-                    return
-
-                if es_respuesta_real:
-                    await guardar_mensaje(msg.telefono, "user", msg.texto)
-                    await guardar_mensaje(msg.telefono, "assistant", respuesta)
-
-                logger.info(f"Respuesta enviada a {msg.telefono}: {respuesta}")
-                return
+            logger.info(f"Respuesta enviada a {msg.telefono}: {respuesta}")
 
         except Exception as e:  # noqa: BLE001
             logger.exception(f"Error procesando el mensaje de {msg.telefono}: {e}")
