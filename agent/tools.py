@@ -233,9 +233,12 @@ async def notificar_operador(operador: str, telefono_cliente: str, mensaje_clien
     if _ZERNIO_TEMPLATE_NOTIFICACION:
         # Camino confiable: template aprobado por Meta. No depende de Direct Send
         # ni de que el operador te haya escrito antes.
+        # Los parametros de un template no pueden tener saltos de linea ni tabs —
+        # Meta los rechaza con el error 132018 "issue with the parameters".
+        mensaje_sin_saltos = " ".join(mensaje_cliente.split())
         payload["templateName"] = _ZERNIO_TEMPLATE_NOTIFICACION
         payload["templateLanguage"] = _ZERNIO_TEMPLATE_IDIOMA
-        payload["templateParams"] = [telefono_cliente, mensaje_cliente]
+        payload["templateParams"] = [telefono_cliente, mensaje_sin_saltos]
     else:
         # Fallback: solo funciona si tu cuenta tiene Direct Send habilitado por Meta.
         payload["message"] = texto
