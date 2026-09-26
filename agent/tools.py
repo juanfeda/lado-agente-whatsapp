@@ -50,14 +50,20 @@ async def buscar_propiedades(
     operation: str = "",
     type: str = "",
     zone: str = "",
+    query: str = "",
     min_price: float | None = None,
     max_price: float | None = None,
     rooms: int | None = None,
+    bedrooms: int | None = None,
 ) -> dict:
     """
     Busca propiedades activas en ladoinmobiliaria.com.ar via propiedades_api.php.
 
     Cualquier parametro vacio/None no se manda (no filtra por esa columna).
+
+    "query" es busqueda libre (titulo + direccion + descripcion) — se usa cuando el
+    cliente menciona una direccion, calle, esquina o cualquier referencia textual
+    concreta en vez de (o adicional a) una zona/barrio generico.
     """
     if not _LADOWEB_API_URL or not _LADOWEB_API_KEY:
         return {"error": "La busqueda de propiedades no esta configurada (falta LADOWEB_API_URL o LADOWEB_API_KEY)"}
@@ -69,12 +75,16 @@ async def buscar_propiedades(
         params["type"] = type
     if zone:
         params["zone"] = zone
+    if query:
+        params["q"] = query
     if min_price is not None:
         params["min_price"] = min_price
     if max_price is not None:
         params["max_price"] = max_price
     if rooms is not None:
         params["rooms"] = rooms
+    if bedrooms is not None:
+        params["bedrooms"] = bedrooms
 
     try:
         async with httpx.AsyncClient(timeout=15.0) as cliente:

@@ -50,8 +50,12 @@ HERRAMIENTAS = [
         "description": (
             "Busca propiedades activas y publicadas en ladoinmobiliaria.com.ar. Usala "
             "cuando el cliente pregunte por propiedades disponibles, precios, zonas, "
-            "o quiera ver opciones concretas para comprar o alquilar. No inventes "
-            "propiedades ni precios: si no tenes datos, usa esta herramienta."
+            "o quiera ver opciones concretas para comprar o alquilar. Si el cliente "
+            "menciona una direccion, calle, esquina o cualquier referencia concreta del "
+            "lugar (ej: 'la de Avenida 51', 'algo cerca de la plaza', 'la que esta en "
+            "170 y 15'), pasala SIEMPRE en el parametro 'query', ademas de los otros "
+            "filtros que haya dado (zona, tipo, dormitorios, precio, operacion). No "
+            "inventes propiedades ni precios: si no tenes datos, usa esta herramienta."
         ),
         "input_schema": {
             "type": "object",
@@ -69,9 +73,19 @@ HERRAMIENTAS = [
                     "type": "string",
                     "description": "Zona o barrio, ej: Ensenada, Punta Lara, La Plata",
                 },
+                "query": {
+                    "type": "string",
+                    "description": (
+                        "Direccion, calle, esquina o cualquier texto libre que el cliente "
+                        "haya mencionado sobre la ubicacion o la propiedad puntual que busca "
+                        "(se busca en titulo, direccion y descripcion). Ej: 'Avenida 51', "
+                        "'esquina 174', 'frente a la plaza'."
+                    ),
+                },
                 "min_price": {"type": "number", "description": "Precio minimo en la moneda de la propiedad"},
                 "max_price": {"type": "number", "description": "Precio maximo en la moneda de la propiedad"},
                 "rooms": {"type": "integer", "description": "Cantidad minima de ambientes"},
+                "bedrooms": {"type": "integer", "description": "Cantidad minima de dormitorios"},
             },
         },
     },
@@ -150,9 +164,11 @@ async def _ejecutar_tool(nombre: str, entrada: dict, telefono_cliente: str = "")
             operation=entrada.get("operation", ""),
             type=entrada.get("type", ""),
             zone=entrada.get("zone", ""),
+            query=entrada.get("query", ""),
             min_price=entrada.get("min_price"),
             max_price=entrada.get("max_price"),
             rooms=entrada.get("rooms"),
+            bedrooms=entrada.get("bedrooms"),
         )
     return {"error": f"Herramienta desconocida: {nombre}"}
 
