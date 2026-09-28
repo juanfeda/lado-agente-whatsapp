@@ -345,7 +345,9 @@ class ProveedorZernio(ProveedorWhatsApp):
             f"(calidad: {telefono.get('quality_rating', '?')})"
         )
 
-    async def conversacion_iniciada_por_negocio(self, conversation_id: str) -> bool:
+    async def conversacion_iniciada_por_negocio(
+        self, conversation_id: str, account_id: str = ""
+    ) -> bool:
         """
         True si el primer mensaje de esta conversacion lo mandaste VOS (por la app de
         WhatsApp Business, no por el bot), no el cliente.
@@ -353,10 +355,19 @@ class ProveedorZernio(ProveedorWhatsApp):
         Se usa para que el bot no interfiera en conversaciones que ya arranco un humano:
         si el cliente jamas escribio primero, no es una consulta que el bot deba atender.
 
+        "account_id" tiene que ser el que trae CADA webhook (contexto["account_id"]), no
+        self.account_id: ese ultimo sale de ZERNIO_ACCOUNT_ID, que el .env.example marca
+        como opcional ("solo para el chequeo de conexion al arrancar") y que en produccion
+        suele quedar vacio. Si se manda accountId="" a Zernio, la consulta fallaba en
+        silencio (nunca devolvia 200) y esta funcion siempre terminaba devolviendo False
+        aunque la conversacion SI la hubiera iniciado el negocio — por eso el bot le
+        seguia contestando a conversaciones que ya habia arrancado un humano a mano.
+
         NOTA: pide la conversacion completa ordenada por fecha y mira el primer mensaje.
         Confirmar el endpoint exacto contra tu cuenta si Zernio lo cambia de nombre.
         """
-        if not self.api_key or not conversation_id:
+        account_id = account_id or self.account_id
+        if not self.api_key or not conversation_id or not account_id:
             return False  # sin como confirmarlo, se asume que no (el bot atiende normal)
 
         url = f"{self.base_url}/inbox/conversations/{conversation_id}/messages"
@@ -364,7 +375,7 @@ class ProveedorZernio(ProveedorWhatsApp):
             async with httpx.AsyncClient(timeout=15.0) as cliente:
                 r = await cliente.get(
                     url,
-                    params={"accountId": self.account_id, "sortOrder": "asc", "limit": 1},
+                    params={"accountId": account_id, "sortOrder": "asc", "limit": 1},
                     headers={"Authorization": f"Bearer {self.api_key}"},
                 )
         except httpx.HTTPError as e:
