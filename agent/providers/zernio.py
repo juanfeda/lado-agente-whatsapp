@@ -85,17 +85,21 @@ class ProveedorZernio(ProveedorWhatsApp):
         Chequea un mensaje SALIENTE (mandado desde el numero del bot, por cualquier via)
         y, si no lo mando el propio bot, marca esa conversacion como derivada en silencio.
 
-        Zernio confirmo el campo real: message.metadata.source es "whatsapp_business_app"
-        cuando lo mandaste vos desde la app (Coexistence), o "cloud_api" cuando salio por
-        la API (nuestro bot, o un humano contestando desde el inbox de Zernio). En el caso
-        "cloud_api" hace falta el chequeo de ID propio para distinguir bot vs humano; en
-        "whatsapp_business_app" ya sabemos seguro que fuiste vos a mano, sin mas vueltas.
+        Zernio confirmo el campo real: message.source es "whatsapp_business_app" cuando lo
+        mandaste vos desde la app (Coexistence), o "cloud_api" cuando salio por la API
+        (nuestro bot, o un humano contestando desde el inbox de Zernio). OJO: "source" viene
+        SUELTO en el objeto message, NO adentro de message.metadata — un payload real de
+        Zernio confirmo esto (`{'message': {..., 'source': 'whatsapp_business_app', ...}}`,
+        sin ninguna clave "metadata"). Leerlo de message.metadata.source (como se hacia
+        antes) daba siempre "" y el chequeo terminaba dependiendo solo del ID de respaldo
+        de mas abajo, que en la practica podia fallar en detectar un mensaje mandado a mano.
+        En el caso "cloud_api" hace falta el chequeo de ID propio para distinguir bot vs
+        humano; en "whatsapp_business_app" ya sabemos seguro que fuiste vos a mano.
 
         El telefono del cliente sale de conversation.participantId (no de message.recipient/
         to, que no existen en el payload real).
         """
-        metadata = mensaje.get("metadata") or {}
-        origen = metadata.get("source", "")
+        origen = mensaje.get("source", "")
         es_de_la_app = origen == "whatsapp_business_app"
 
         if not es_de_la_app:
