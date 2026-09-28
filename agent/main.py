@@ -525,7 +525,10 @@ async def procesar_mensaje(msg: MensajeEntrante):
             # de WhatsApp Business, el bot no se mete: lo marca como derivado en silencio
             # (sin mandarle ningun mensaje) y listo, queda en manos humanas.
             conversation_id = msg.contexto.get("conversation_id", "")
-            if conversation_id and await proveedor.conversacion_iniciada_por_negocio(conversation_id):
+            account_id = msg.contexto.get("account_id", "")
+            if conversation_id and await proveedor.conversacion_iniciada_por_negocio(
+                conversation_id, account_id
+            ):
                 await marcar_derivado(msg.telefono, "otro", "")
                 logger.info(f"Conversacion con {msg.telefono} la inicio el negocio: el bot no responde")
                 return
