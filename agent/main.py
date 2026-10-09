@@ -433,6 +433,7 @@ MENSAJE_DERIVACION = {
 PRESENTACION = "Hola, soy el asistente virtual de Lado Inmobiliaria."
 
 MENSAJE_ADJUNTO = (
+    f"{PRESENTACION} "
     "Por el momento no puedo ver fotos, videos ni archivos. "
     "Te voy a derivar con alguien de nuestro equipo para que pueda ayudarte. En breve te contactan."
 )
