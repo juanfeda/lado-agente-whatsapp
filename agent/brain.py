@@ -100,6 +100,26 @@ HERRAMIENTAS = [
         "input_schema": {"type": "object", "properties": {}},
     },
     {
+        "name": "derivar_por_no_entender",
+        "description": (
+            "Llamala INMEDIATAMENTE cuando no entiendas lo que el cliente te pide o "
+            "necesita: mensaje confuso, ambiguo, sin sentido, o un pedido que no sabes "
+            "como resolver. NO le pidas que reformule y NO le pidas nombre ni telefono: "
+            "se deriva a una persona del equipo en el acto. Pasale un resumen breve de lo "
+            "que dijo el cliente."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "resumen": {
+                    "type": "string",
+                    "description": "Lo que dijo el cliente y por que no se entendio, para el humano que sigue",
+                },
+            },
+            "required": ["resumen"],
+        },
+    },
+    {
         "name": "derivar_a_humano",
         "description": (
             "Llamala cuando el cliente ya esta listo para que un humano continue. "
@@ -304,8 +324,11 @@ async def generar_respuesta(
     """
     global _soporta_esfuerzo
 
-    if not mensaje or len(mensaje.strip()) < 2:
-        return obtener_mensaje_fallback(), False, None
+    # Un mensaje vacio o de un solo caracter, sin conversacion previa, no se puede entender:
+    # se deriva a una persona en vez de pedirle que reformule. (Con historial previo, un
+    # "ok" o un "👍" tiene sentido en contexto y lo maneja el modelo.)
+    if not mensaje or not mensaje.strip() or (len(mensaje.strip()) < 2 and not historial):
+        return "", False, {"inmediata": True, "resumen": f"Mensaje no interpretable: {mensaje!r}"}
 
     mensajes = [{"role": m["role"], "content": m["content"]} for m in historial]
     mensajes.append({"role": "user", "content": mensaje})
@@ -348,6 +371,16 @@ async def generar_respuesta(
     derivar = None
     while getattr(respuesta, "stop_reason", None) == "tool_use" and vueltas < 4:
         vueltas += 1
+
+        # No entiende lo que pide el cliente: se deriva en el acto, sin pedir datos.
+        llamada_no_entiende = next(
+            (b for b in respuesta.content if b.type == "tool_use" and b.name == "derivar_por_no_entender"),
+            None,
+        )
+        if llamada_no_entiende is not None:
+            derivar = {"inmediata": True, "resumen": llamada_no_entiende.input.get("resumen", "")}
+            logger.info(f"Claude no entendio el pedido y deriva de inmediato: {derivar}")
+            break
 
         llamada_derivar = next(
             (b for b in respuesta.content if b.type == "tool_use" and b.name == "derivar_a_humano"), None
@@ -401,8 +434,9 @@ async def generar_respuesta(
 
     texto = _extraer_texto(respuesta)
     if not texto and derivar is None:
-        logger.warning("Claude devolvio una respuesta sin texto")
-        return obtener_mensaje_fallback(), False, None
+        # Sin respuesta utilizable = no supo que contestar: se deriva, no se pide reformular.
+        logger.warning("Claude devolvio una respuesta sin texto: se deriva a una persona")
+        return "", False, {"inmediata": True, "resumen": f"El asistente no pudo responder a: {mensaje[:200]}"}
 
     logger.info(
         f"Respuesta generada con {MODELO} "

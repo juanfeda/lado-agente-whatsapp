@@ -367,7 +367,9 @@ async def webhook_handler(request: Request, tareas: BackgroundTasks):
 
     encolados = 0
     for msg in mensajes:
-        if msg.es_propio or not msg.texto.strip():
+        # Un mensaje con adjunto y sin texto (foto, audio, etc.) SI se atiende: el bot le
+        # avisa al cliente que no puede verlo y lo deriva.
+        if msg.es_propio or (not msg.texto.strip() and not msg.tiene_adjunto):
             continue
 
         # Los mensajes de los propios operadores (ej: el "hola" para abrir la ventana
@@ -415,7 +417,7 @@ async def webhook_handler(request: Request, tareas: BackgroundTasks):
             logger.info(f"Evento repetido, se ignora: {evento_id}")
             continue
 
-        logger.info(f"Mensaje de {msg.telefono}: {msg.texto}")
+        logger.info(f"Mensaje de {msg.telefono}: {msg.texto or '[adjunto]'}")
         tareas.add_task(procesar_mensaje, msg)
         encolados += 1
 
@@ -426,6 +428,29 @@ MENSAJE_DERIVACION = {
     "alquiler": "Gracias! Ya te estamos derivando con Nicolás, de nuestro equipo de alquileres. En breve te contacta.",
     "otro": "Gracias! En breve te contacta uno de nuestros asesores.",
 }
+
+# Presentacion obligatoria en el primer mensaje que recibe un cliente.
+PRESENTACION = "Hola, soy el asistente virtual de Lado Inmobiliaria."
+
+MENSAJE_ADJUNTO = (
+    "Por el momento no puedo ver fotos, videos ni archivos. "
+    "Te voy a derivar con alguien de nuestro equipo para que pueda ayudarte. En breve te contactan."
+)
+
+MENSAJE_NO_ENTENDI = (
+    "No logré entender bien tu consulta, así que te derivo con alguien de nuestro equipo "
+    "para que te ayude. En breve te contactan."
+)
+
+
+def _con_presentacion(texto: str, es_primero: bool) -> str:
+    """
+    En el primer mensaje a un cliente, SIEMPRE aclara que es un asistente virtual.
+    Si la IA ya lo dijo por su cuenta, no se repite.
+    """
+    if es_primero and "asistente virtual" not in texto.lower():
+        return f"{PRESENTACION}\n\n{texto}"
+    return texto
 
 
 async def _avisar_y_derivar(msg: MensajeEntrante, categoria: str, operador: str, resumen: str, mensaje_ia: str = ""):
@@ -444,7 +469,7 @@ async def _avisar_y_derivar(msg: MensajeEntrante, categoria: str, operador: str,
     await proveedor.enviar_mensaje(msg.telefono, texto_cliente, msg.contexto)
 
 
-async def _derivar_desde_ia(msg: MensajeEntrante, derivar: dict, respuesta_ia: str):
+async def _derivar_desde_ia(msg: MensajeEntrante, derivar: dict, respuesta_ia: str, es_primero: bool = False):
     """
     La IA decidio que el cliente ya esta listo para que un humano siga (sea porque
     encontro una propiedad, o porque el tema no lo puede resolver ella misma).
@@ -452,8 +477,16 @@ async def _derivar_desde_ia(msg: MensajeEntrante, derivar: dict, respuesta_ia: s
     -> queda en este mismo numero, atendido directamente (lo ves en el inbox).
     En los dos casos se carga el lead y la agenda en el CRM con lo que junto la IA.
     """
-    operacion = derivar.get("operacion", "venta")
     resumen = derivar.get("resumen", "")
+
+    # La IA no entendio el pedido: se deriva en el acto, sin datos del cliente. No se
+    # crea lead en el CRM porque no hay nombre ni apellido.
+    if derivar.get("inmediata"):
+        await _avisar_y_derivar(msg, "otro", "", resumen, _con_presentacion(MENSAJE_NO_ENTENDI, es_primero))
+        logger.info(f"{msg.telefono}: la IA no entendio y derivo de inmediato — {resumen}")
+        return
+
+    operacion = derivar.get("operacion", "venta")
 
     if operacion == "alquiler":
         await _avisar_y_derivar(msg, "alquiler", operador_para("alquiler"), resumen, respuesta_ia)
@@ -552,14 +585,38 @@ async def procesar_mensaje(msg: MensajeEntrante):
                 await marcar_etapa(msg.telefono, "conversando")
 
             historial = await obtener_historial(msg.telefono)
+            # Primer mensaje de este cliente (o primero tras reiniciarse por inactividad):
+            # la respuesta tiene que presentarse como asistente virtual.
+            es_primero = not historial
+
+            # Adjunto (foto, video, audio, archivo): el bot no lo puede ver. Se le avisa al
+            # cliente y se deriva a una persona del equipo.
+            if msg.tiene_adjunto:
+                await guardar_mensaje(msg.telefono, "user", msg.texto or "[El cliente envió un adjunto]")
+                await _avisar_y_derivar(
+                    msg, "otro", "", "El cliente envió un adjunto (foto, video o archivo)",
+                    _con_presentacion(MENSAJE_ADJUNTO, es_primero),
+                )
+                logger.info(f"{msg.telefono}: envio un adjunto, se deriva a una persona")
+                return
+
+            nota = (
+                "Es el PRIMER mensaje de este cliente: empeza tu respuesta presentandote como "
+                "el asistente virtual de Lado Inmobiliaria (ej: 'Hola, soy el asistente virtual "
+                "de Lado Inmobiliaria') y despues segui con lo que corresponda."
+                if es_primero else ""
+            )
             respuesta, es_respuesta_real, derivar = await generar_respuesta(
-                msg.texto, historial, telefono_cliente=msg.telefono
+                msg.texto, historial, nota_sistema=nota, telefono_cliente=msg.telefono
             )
 
             if derivar is not None:
                 await guardar_mensaje(msg.telefono, "user", msg.texto)
-                await _derivar_desde_ia(msg, derivar, respuesta)
+                await _derivar_desde_ia(msg, derivar, respuesta, es_primero)
                 return
+
+            if es_respuesta_real:
+                respuesta = _con_presentacion(respuesta, es_primero)
 
             enviado = await proveedor.enviar_mensaje(msg.telefono, respuesta, msg.contexto)
             if not enviado:
