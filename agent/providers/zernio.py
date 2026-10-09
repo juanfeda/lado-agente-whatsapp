@@ -174,12 +174,25 @@ class ProveedorZernio(ProveedorWhatsApp):
         interactive_id = metadata.get("interactiveId") or metadata.get("interactive_id") or ""
         texto = interactive_id or (mensaje.get("text") or "")
 
+        # Adjuntos (foto, video, audio, documento, sticker...): el bot no los puede ver.
+        # Zernio los manda en message.attachments (lista); como respaldo tambien miramos
+        # message.type por si algun tipo llega sin lista de adjuntos.
+        tipo = str(mensaje.get("type") or mensaje.get("messageType") or "").lower()
+        tiene_adjunto = bool(mensaje.get("attachments")) or tipo in {
+            "image", "video", "audio", "voice", "document", "file", "sticker",
+        }
+
+        if tiene_adjunto:
+            # Para confirmar con un payload real los nombres de campo de los adjuntos.
+            logger.info(f"Adjunto recibido de {telefono} (type={tipo!r}): {mensaje.get('attachments')}")
+
         return [
             MensajeEntrante(
                 telefono=telefono,
                 texto=texto,
                 mensaje_id=mensaje.get("platformMessageId") or mensaje.get("id") or "",
                 es_propio=False,  # ya filtramos los salientes arriba
+                tiene_adjunto=tiene_adjunto,
                 contexto={
                     "evento_id": payload.get("id", ""),
                     "conversation_id": mensaje.get("conversationId", ""),

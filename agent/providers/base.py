@@ -21,6 +21,7 @@ class MensajeEntrante:
     mensaje_id: str          # Id del mensaje en la plataforma
     es_propio: bool          # True si lo mando el agente (se ignora)
     contexto: dict = field(default_factory=dict)
+    tiene_adjunto: bool = False  # True si trae foto, video, audio, documento, etc.
     # "contexto" lleva lo que cada proveedor necesita para poder responder:
     #   evento_id       -> id unico del evento, para no procesar dos veces lo mismo
     #   conversation_id -> Zernio: en que conversacion hay que responder
