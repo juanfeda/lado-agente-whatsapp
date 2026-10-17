@@ -9,6 +9,7 @@ Funciona con cualquier proveedor (Zernio, Meta) gracias a la capa de providers.
 import asyncio
 import logging
 import os
+import re
 from collections import defaultdict
 from contextlib import asynccontextmanager
 from datetime import timedelta
@@ -111,6 +112,7 @@ async def lifespan(app: FastAPI):
     await limpiar_mensajes_viejos(dias=DIAS_RETENCION_HISTORIAL)
     logger.info(f"Base de datos lista (retencion de historial: {DIAS_RETENCION_HISTORIAL} dias)")
     logger.info(f"Servidor AgentKit escuchando en el puerto {PORT}")
+    logger.info("VERSION main.py: adjuntos->Juan Manuel / sin presentacion / limite 6 respuestas")
 
     global estado_proveedor
     if proveedor is not None:
@@ -306,17 +308,21 @@ document.getElementById('reiniciar').onclick = () => {{
 """
 
 
+VERSION_CODIGO = "2026-10-16-v4 bienvenida-fija / sin-presentacion / adjuntos-JuanManuel / limite-6"
+
+
 @app.get("/")
 async def health_check():
     """Endpoint de salud para Railway y monitoreo."""
     if error_configuracion:
-        return {"status": "error", "service": "agentkit", "detalle": error_configuracion}
+        return {"status": "error", "service": "agentkit", "version": VERSION_CODIGO, "detalle": error_configuracion}
 
     # Se responde 200 aunque las credenciales esten mal, para que Railway no marque el
     # deploy como caido y puedas leer el diagnostico. El detalle esta en el cuerpo.
     return {
         "status": "ok" if estado_proveedor["ok"] else "degradado",
         "service": "agentkit",
+        "version": VERSION_CODIGO,
         "proveedor": proveedor.__class__.__name__ if proveedor else None,
         "conexion": estado_proveedor,
     }
@@ -433,10 +439,49 @@ MENSAJE_DERIVACION = {
 PRESENTACION = "Hola, soy el asistente virtual de Lado Inmobiliaria."
 
 MENSAJE_ADJUNTO = (
-    f"{PRESENTACION} "
-    "Por el momento no puedo ver fotos, videos ni archivos. "
-    "Te voy a derivar con alguien de nuestro equipo para que pueda ayudarte. En breve te contactan."
+    "Disculpá, no puedo responder a imágenes, videos ni archivos por este medio. "
+    "En un momento te comunico con Juan Manuel."
 )
+
+# Despues de tantas respuestas del bot, la charla pasa a una persona.
+MAX_RESPUESTAS_BOT = 6
+
+MENSAJE_LIMITE = {
+    "alquiler": (
+        "Disculpame, no puedo seguir respondiéndote por acá. Ya te derivo con Nicolás, "
+        "de nuestro equipo de alquileres, para que te siga ayudando. En breve te contacta."
+    ),
+    "otro": (
+        "Disculpame, no puedo seguir respondiéndote por acá. Ya te derivo con Juan Manuel "
+        "para que te siga ayudando. En breve te contacta."
+    ),
+}
+
+
+def _es_tema_alquiler(historial: list[dict], texto_actual: str) -> bool:
+    """True si en lo que escribio el cliente aparece algo de alquileres."""
+    textos = [m["content"] for m in historial if m["role"] == "user"] + [texto_actual or ""]
+    return any(re.search(r"alquil|inquilin|locat", t, re.IGNORECASE) for t in textos)
+
+
+# Primer mensaje cuando el cliente solo saluda: bienvenida fija, sin opciones.
+MENSAJE_BIENVENIDA = "¡Hola! Bienvenido a Lado Inmobiliaria. ¿En qué te podemos ayudar?"
+
+_PALABRAS_SALUDO = {
+    "hola", "holaa", "holis", "ola", "buenas", "buen", "buenos", "dia", "dias", "día", "días",
+    "tarde", "tardes", "noche", "noches", "que", "qué", "tal", "como", "cómo", "estan", "están",
+    "estas", "estás", "andan", "va", "todo", "bien", "hey", "saludos", "consulta", "consultas",
+    "informacion", "información", "info", "una", "un", "quería", "queria", "quisiera", "hacer",
+    "preguntar", "por", "favor", "alguien", "atiende", "hay", "ahi", "ahí", "disponible", "si",
+    "sí", "me", "podrian", "podrían", "ayudar", "ayudan", "puedo", "te", "le", "les", "tienen",
+}
+
+
+def _es_solo_saludo(texto: str) -> bool:
+    """True si el mensaje es solo un saludo / apertura sin contar que necesita."""
+    palabras = re.findall(r"[a-záéíóúñü]+", (texto or "").lower())
+    return bool(palabras) and all(p in _PALABRAS_SALUDO for p in palabras)
+
 
 MENSAJE_NO_ENTENDI = (
     "No logré entender bien tu consulta, así que te derivo con alguien de nuestro equipo "
@@ -483,7 +528,7 @@ async def _derivar_desde_ia(msg: MensajeEntrante, derivar: dict, respuesta_ia: s
     # La IA no entendio el pedido: se deriva en el acto, sin datos del cliente. No se
     # crea lead en el CRM porque no hay nombre ni apellido.
     if derivar.get("inmediata"):
-        await _avisar_y_derivar(msg, "otro", "", resumen, _con_presentacion(MENSAJE_NO_ENTENDI, es_primero))
+        await _avisar_y_derivar(msg, "otro", "", resumen, MENSAJE_NO_ENTENDI)
         logger.info(f"{msg.telefono}: la IA no entendio y derivo de inmediato — {resumen}")
         return
 
@@ -595,16 +640,45 @@ async def procesar_mensaje(msg: MensajeEntrante):
             if msg.tiene_adjunto:
                 await guardar_mensaje(msg.telefono, "user", msg.texto or "[El cliente envió un adjunto]")
                 await _avisar_y_derivar(
-                    msg, "otro", "", "El cliente envió un adjunto (foto, video o archivo)",
-                    _con_presentacion(MENSAJE_ADJUNTO, es_primero),
+                    msg, "otro", "", "El cliente envió un adjunto (foto, video o archivo): derivado a Juan Manuel",
+                    MENSAJE_ADJUNTO,
                 )
                 logger.info(f"{msg.telefono}: envio un adjunto, se deriva a una persona")
                 return
 
+            # Primer mensaje que es solo un saludo: bienvenida fija, sin opciones y sin
+            # pasar por la IA (asi no ofrece "comprar o alquilar").
+            if es_primero and _es_solo_saludo(msg.texto):
+                enviado = await proveedor.enviar_mensaje(msg.telefono, MENSAJE_BIENVENIDA, msg.contexto)
+                if not enviado:
+                    await liberar_evento(evento_id)
+                    return
+                await guardar_mensaje(msg.telefono, "user", msg.texto)
+                await guardar_mensaje(msg.telefono, "assistant", MENSAJE_BIENVENIDA)
+                logger.info(f"Bienvenida enviada a {msg.telefono}")
+                return
+
+            # Conversacion larga: tras MAX_RESPUESTAS_BOT respuestas del bot, pide disculpas
+            # y deriva (alquileres -> Nicolas, lo demas -> Juan Manuel).
+            respuestas_bot = sum(1 for m in historial if m["role"] == "assistant")
+            if respuestas_bot >= MAX_RESPUESTAS_BOT:
+                alquiler = _es_tema_alquiler(historial, msg.texto)
+                await guardar_mensaje(msg.telefono, "user", msg.texto)
+                await _avisar_y_derivar(
+                    msg,
+                    "alquiler" if alquiler else "otro",
+                    operador_para("alquiler") if alquiler else "",
+                    f"Conversación larga con el bot ({respuestas_bot} respuestas). Último mensaje: {msg.texto}",
+                    MENSAJE_LIMITE["alquiler" if alquiler else "otro"],
+                )
+                logger.info(f"{msg.telefono}: llego al limite de {MAX_RESPUESTAS_BOT} respuestas, se deriva")
+                return
+
             nota = (
-                "Es el PRIMER mensaje de este cliente: empeza tu respuesta presentandote como "
-                "el asistente virtual de Lado Inmobiliaria (ej: 'Hola, soy el asistente virtual "
-                "de Lado Inmobiliaria') y despues segui con lo que corresponda."
+                "Es el PRIMER mensaje de este cliente: respondé amablemente a lo que escribió, "
+                "como una persona del equipo. No digas que sos un asistente virtual ni un bot. "
+                "Si solo saludó, devolvé el saludo y preguntale en qué lo podés ayudar, sin "
+                "ofrecerle opciones ni listas de temas."
                 if es_primero else ""
             )
             respuesta, es_respuesta_real, derivar = await generar_respuesta(
@@ -615,9 +689,6 @@ async def procesar_mensaje(msg: MensajeEntrante):
                 await guardar_mensaje(msg.telefono, "user", msg.texto)
                 await _derivar_desde_ia(msg, derivar, respuesta, es_primero)
                 return
-
-            if es_respuesta_real:
-                respuesta = _con_presentacion(respuesta, es_primero)
 
             enviado = await proveedor.enviar_mensaje(msg.telefono, respuesta, msg.contexto)
             if not enviado:
