@@ -43,6 +43,7 @@ from agent.memory import (
 )
 from agent.providers import obtener_proveedor
 from agent.providers.base import MensajeEntrante
+from agent.transcripcion import transcribir, transcripcion_disponible
 from agent.tools import OPERADOR_ALQUILERES, crear_lead_crm, notificar_operador, operador_para
 
 load_dotenv()
@@ -308,7 +309,7 @@ document.getElementById('reiniciar').onclick = () => {{
 """
 
 
-VERSION_CODIGO = "2026-10-16-v4 bienvenida-fija / sin-presentacion / adjuntos-JuanManuel / limite-6"
+VERSION_CODIGO = "2026-10-19-v5 audios; 2026-10-16-v4 bienvenida-fija / sin-presentacion / adjuntos-JuanManuel / limite-6"
 
 
 @app.get("/")
@@ -635,6 +636,19 @@ async def procesar_mensaje(msg: MensajeEntrante):
             # la respuesta tiene que presentarse como asistente virtual.
             es_primero = not historial
 
+            # Audio: se transcribe y se responde por escrito como si fuera un mensaje de texto.
+            es_audio = False
+            if msg.tiene_adjunto and msg.audio_url and transcripcion_disponible():
+                contenido = await proveedor.descargar_media(msg.audio_url)
+                transcripcion = await transcribir(contenido, msg.audio_mime) if contenido else ""
+                if transcripcion:
+                    logger.info(f"Audio de {msg.telefono} transcripto: {transcripcion}")
+                    msg.texto = transcripcion
+                    msg.tiene_adjunto = False
+                    es_audio = True
+                else:
+                    logger.warning(f"No se pudo transcribir el audio de {msg.telefono}; se deriva")
+
             # Adjunto (foto, video, audio, archivo): el bot no lo puede ver. Se le avisa al
             # cliente y se deriva a una persona del equipo.
             if msg.tiene_adjunto:
@@ -681,6 +695,11 @@ async def procesar_mensaje(msg: MensajeEntrante):
                 "ofrecerle opciones ni listas de temas."
                 if es_primero else ""
             )
+            if es_audio:
+                nota += (
+                    " El cliente mandó un AUDIO; el texto del mensaje es su transcripción "
+                    "automática (puede tener errores). Respondé por escrito, de forma natural."
+                )
             respuesta, es_respuesta_real, derivar = await generar_respuesta(
                 msg.texto, historial, nota_sistema=nota, telefono_cliente=msg.telefono
             )
