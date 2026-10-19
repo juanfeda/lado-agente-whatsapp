@@ -309,7 +309,7 @@ document.getElementById('reiniciar').onclick = () => {{
 """
 
 
-VERSION_CODIGO = "2026-10-19-v5 audios; 2026-10-16-v4 bienvenida-fija / sin-presentacion / adjuntos-JuanManuel / limite-6"
+VERSION_CODIGO = "2026-10-19-v6 audios; 2026-10-16-v4 bienvenida-fija / sin-presentacion / adjuntos-JuanManuel / limite-6"
 
 
 @app.get("/")
@@ -638,8 +638,14 @@ async def procesar_mensaje(msg: MensajeEntrante):
 
             # Audio: se transcribe y se responde por escrito como si fuera un mensaje de texto.
             es_audio = False
+            if msg.tiene_adjunto and not msg.audio_url:
+                logger.info(f"AUDIO: {msg.telefono} mando un adjunto sin URL de audio reconocible, se deriva")
+            elif msg.tiene_adjunto and not transcripcion_disponible():
+                logger.warning("AUDIO: falta GROQ_API_KEY u OPENAI_API_KEY en Railway, se deriva")
             if msg.tiene_adjunto and msg.audio_url and transcripcion_disponible():
                 contenido = await proveedor.descargar_media(msg.audio_url)
+                if not contenido:
+                    logger.warning("AUDIO: no se pudo descargar el audio desde Zernio")
                 transcripcion = await transcribir(contenido, msg.audio_mime) if contenido else ""
                 if transcripcion:
                     logger.info(f"Audio de {msg.telefono} transcripto: {transcripcion}")
