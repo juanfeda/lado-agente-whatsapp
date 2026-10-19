@@ -182,6 +182,18 @@ class ProveedorZernio(ProveedorWhatsApp):
             "image", "video", "audio", "voice", "document", "file", "sticker",
         }
 
+        # Nota de voz / audio: guardamos la URL para poder transcribirlo.
+        audio_url, audio_mime = "", ""
+        for adj in mensaje.get("attachments") or []:
+            if not isinstance(adj, dict):
+                continue
+            payload_adj = adj.get("payload") or {}
+            mime = str(payload_adj.get("mimeType") or adj.get("mimeType") or "")
+            tipo_adj = str(adj.get("type") or "").lower()
+            if tipo_adj in {"audio", "voice"} or mime.startswith("audio/"):
+                audio_url, audio_mime = adj.get("url") or "", mime
+                break
+
         if tiene_adjunto:
             # Para confirmar con un payload real los nombres de campo de los adjuntos.
             logger.info(f"Adjunto recibido de {telefono} (type={tipo!r}): {mensaje.get('attachments')}")
@@ -193,6 +205,8 @@ class ProveedorZernio(ProveedorWhatsApp):
                 mensaje_id=mensaje.get("platformMessageId") or mensaje.get("id") or "",
                 es_propio=False,  # ya filtramos los salientes arriba
                 tiene_adjunto=tiene_adjunto,
+                audio_url=audio_url,
+                audio_mime=audio_mime,
                 contexto={
                     "evento_id": payload.get("id", ""),
                     "conversation_id": mensaje.get("conversationId", ""),
@@ -200,6 +214,21 @@ class ProveedorZernio(ProveedorWhatsApp):
                 },
             )
         ]
+
+    async def descargar_media(self, url: str) -> bytes:
+        """Baja un adjunto desde Zernio (necesita la API key)."""
+        if not url:
+            return b""
+        try:
+            async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as cliente:
+                r = await cliente.get(url, headers={"Authorization": f"Bearer {self.api_key}"})
+        except httpx.HTTPError as e:
+            logger.error(f"Error de red bajando el audio: {e}")
+            return b""
+        if r.status_code != 200:
+            logger.error(f"No se pudo bajar el audio [{r.status_code}]: {r.text[:200]}")
+            return b""
+        return r.content
 
     # ── Enviar ───────────────────────────────────────────────────────────
 

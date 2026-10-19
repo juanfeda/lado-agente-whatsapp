@@ -22,6 +22,8 @@ class MensajeEntrante:
     es_propio: bool          # True si lo mando el agente (se ignora)
     contexto: dict = field(default_factory=dict)
     tiene_adjunto: bool = False  # True si trae foto, video, audio, documento, etc.
+    audio_url: str = ""          # URL del audio (nota de voz), si trae uno
+    audio_mime: str = ""         # Tipo MIME del audio
     # "contexto" lleva lo que cada proveedor necesita para poder responder:
     #   evento_id       -> id unico del evento, para no procesar dos veces lo mismo
     #   conversation_id -> Zernio: en que conversacion hay que responder
@@ -54,6 +56,10 @@ class ProveedorWhatsApp(ABC):
     ) -> bool:
         """Envia hasta 3 botones de respuesta rapida. Solo implementado por Zernio."""
         raise NotImplementedError(f"{self.__class__.__name__} no soporta botones")
+
+    async def descargar_media(self, url: str) -> bytes:
+        """Descarga un archivo adjunto (audio). Cada proveedor lo implementa."""
+        return b""
 
     async def verificar_firma(self, request: Request) -> bool:
         """
