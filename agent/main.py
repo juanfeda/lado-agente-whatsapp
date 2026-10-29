@@ -572,19 +572,26 @@ async def procesar_mensaje(msg: MensajeEntrante):
 
     async with _candados[msg.telefono]:
         try:
-            # Si paso mucho tiempo sin que este cliente escriba, arranca de cero con
-            # el menu principal — sea cual sea el estado en el que haya quedado antes
-            # (derivado, en un menu, charlando con la IA).
+            # Si paso mucho tiempo sin que este cliente escriba, la charla con la IA
+            # arranca de cero. PERO si el cliente ya fue derivado (un operador tomo la
+            # conversacion, a mano o porque el bot lo derivo), queda derivado PARA SIEMPRE:
+            # el bot no le vuelve a contestar nunca mas por inactividad. Solo se reactiva
+            # si un humano lo pide explicitamente (/listo o /admin/desmarcar).
             ultima = await obtener_ultima_actividad(msg.telefono)
             await marcar_actividad(msg.telefono)
             if ultima is not None and (ahora() - ultima) > timedelta(days=DIAS_INACTIVIDAD_RESET):
-                await limpiar_historial(msg.telefono)
-                await desmarcar_derivado(msg.telefono)
-                await limpiar_etapa(msg.telefono)
-                logger.info(
-                    f"{msg.telefono} sin actividad hace mas de {DIAS_INACTIVIDAD_RESET} dias: "
-                    "vuelve al menu principal"
-                )
+                if await obtener_derivacion(msg.telefono) is None:
+                    await limpiar_historial(msg.telefono)
+                    await limpiar_etapa(msg.telefono)
+                    logger.info(
+                        f"{msg.telefono} sin actividad hace mas de {DIAS_INACTIVIDAD_RESET} dias: "
+                        "vuelve al menu principal"
+                    )
+                else:
+                    logger.info(
+                        f"{msg.telefono} sin actividad hace mas de {DIAS_INACTIVIDAD_RESET} dias, "
+                        "pero ya estaba derivado: sigue en manos de un humano"
+                    )
 
             derivacion = await obtener_derivacion(msg.telefono)
 
