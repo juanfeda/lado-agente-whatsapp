@@ -55,7 +55,11 @@ HERRAMIENTAS = [
             "lugar (ej: 'la de Avenida 51', 'algo cerca de la plaza', 'la que esta en "
             "170 y 15'), pasala SIEMPRE en el parametro 'query', ademas de los otros "
             "filtros que haya dado (zona, tipo, dormitorios, precio, operacion). No "
-            "inventes propiedades ni precios: si no tenes datos, usa esta herramienta."
+            "inventes propiedades ni precios: si no tenes datos, usa esta herramienta. "
+            "No pongas en 'query' cosas que ya van en otro parametro (dormitorios, "
+            "ambientes, tipo, zona, precio): 'query' es solo para direcciones o referencias. "
+            "Cada resultado trae 'dormitorios', 'ambientes' y 'coincidencia'; la respuesta "
+            "trae 'total', 'exactas' y una 'nota' que tenes que respetar."
         ),
         "input_schema": {
             "type": "object",
@@ -84,8 +88,21 @@ HERRAMIENTAS = [
                 },
                 "min_price": {"type": "number", "description": "Precio minimo en la moneda de la propiedad"},
                 "max_price": {"type": "number", "description": "Precio maximo en la moneda de la propiedad"},
-                "rooms": {"type": "integer", "description": "Cantidad minima de ambientes"},
-                "bedrooms": {"type": "integer", "description": "Cantidad minima de dormitorios"},
+                "rooms": {
+                    "type": "integer",
+                    "description": (
+                        "Cantidad de ambientes que pide el cliente. Vuelven primero las que "
+                        "tienen exactamente esa cantidad y despues las que tienen mas."
+                    ),
+                },
+                "bedrooms": {
+                    "type": "integer",
+                    "description": (
+                        "Cantidad de dormitorios que pide el cliente. Vuelven primero las que "
+                        "tienen exactamente esa cantidad (coincidencia='exacta') y despues las "
+                        "que tienen mas. Se busca en los datos cargados y en la descripcion."
+                    ),
+                },
             },
         },
     },
