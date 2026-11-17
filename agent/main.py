@@ -309,7 +309,7 @@ document.getElementById('reiniciar').onclick = () => {{
 """
 
 
-VERSION_CODIGO = "2026-10-19-v6 audios; 2026-10-16-v4 bienvenida-fija / sin-presentacion / adjuntos-JuanManuel / limite-6"
+VERSION_CODIGO = "2026-11-17-v7 audios; 2026-10-16-v4 bienvenida-fija / sin-presentacion / adjuntos-JuanManuel / limite-6"
 
 
 @app.get("/")
@@ -484,6 +484,21 @@ def _es_solo_saludo(texto: str) -> bool:
     return bool(palabras) and all(p in _PALABRAS_SALUDO for p in palabras)
 
 
+MENSAJE_PEDIDO_HUMANO = "Perfecto, ya te derivo con Juan Manuel. En breve te contacta."
+
+# El cliente pide hablar con una persona (operador, encargado, gerente, etc.).
+_RE_PIDE_HUMANO = re.compile(
+    r"\b(operador(a)?|gerente|supervisor(a)?|agente humano|persona real|ser humano)\b"
+    r"|(hablar|comunicar(me|nos)?|contactar(me)?|pasa(r|me)?|derivar(me)?|atiend[ae]|atender|llam(e|en|ar))"
+    r"[^.?!\n]{0,25}\b(encargad[oa]|jef[ea]|asesor(a)?|humano|persona|alguien|responsable|un agente)\b",
+    re.IGNORECASE,
+)
+
+
+def _pide_humano(texto: str) -> bool:
+    return bool(_RE_PIDE_HUMANO.search(texto or ""))
+
+
 MENSAJE_NO_ENTENDI = (
     "No logré entender bien tu consulta, así que te derivo con alguien de nuestro equipo "
     "para que te ayude. En breve te contactan."
@@ -572,26 +587,19 @@ async def procesar_mensaje(msg: MensajeEntrante):
 
     async with _candados[msg.telefono]:
         try:
-            # Si paso mucho tiempo sin que este cliente escriba, la charla con la IA
-            # arranca de cero. PERO si el cliente ya fue derivado (un operador tomo la
-            # conversacion, a mano o porque el bot lo derivo), queda derivado PARA SIEMPRE:
-            # el bot no le vuelve a contestar nunca mas por inactividad. Solo se reactiva
-            # si un humano lo pide explicitamente (/listo o /admin/desmarcar).
+            # Si paso mucho tiempo sin que este cliente escriba, arranca de cero con
+            # el menu principal — sea cual sea el estado en el que haya quedado antes
+            # (derivado, en un menu, charlando con la IA).
             ultima = await obtener_ultima_actividad(msg.telefono)
             await marcar_actividad(msg.telefono)
             if ultima is not None and (ahora() - ultima) > timedelta(days=DIAS_INACTIVIDAD_RESET):
-                if await obtener_derivacion(msg.telefono) is None:
-                    await limpiar_historial(msg.telefono)
-                    await limpiar_etapa(msg.telefono)
-                    logger.info(
-                        f"{msg.telefono} sin actividad hace mas de {DIAS_INACTIVIDAD_RESET} dias: "
-                        "vuelve al menu principal"
-                    )
-                else:
-                    logger.info(
-                        f"{msg.telefono} sin actividad hace mas de {DIAS_INACTIVIDAD_RESET} dias, "
-                        "pero ya estaba derivado: sigue en manos de un humano"
-                    )
+                await limpiar_historial(msg.telefono)
+                await desmarcar_derivado(msg.telefono)
+                await limpiar_etapa(msg.telefono)
+                logger.info(
+                    f"{msg.telefono} sin actividad hace mas de {DIAS_INACTIVIDAD_RESET} dias: "
+                    "vuelve al menu principal"
+                )
 
             derivacion = await obtener_derivacion(msg.telefono)
 
@@ -683,6 +691,17 @@ async def procesar_mensaje(msg: MensajeEntrante):
                 await guardar_mensaje(msg.telefono, "user", msg.texto)
                 await guardar_mensaje(msg.telefono, "assistant", MENSAJE_BIENVENIDA)
                 logger.info(f"Bienvenida enviada a {msg.telefono}")
+                return
+
+            # Pide hablar con un operador / encargado / gerente: se deriva en el acto a
+            # Juan Manuel, sin pedir ningun dato.
+            if _pide_humano(msg.texto):
+                await guardar_mensaje(msg.telefono, "user", msg.texto)
+                await _avisar_y_derivar(
+                    msg, "otro", "", f"El cliente pidió hablar con una persona: {msg.texto}",
+                    MENSAJE_PEDIDO_HUMANO,
+                )
+                logger.info(f"{msg.telefono}: pidio hablar con una persona, se deriva a Juan Manuel")
                 return
 
             # Conversacion larga: tras MAX_RESPUESTAS_BOT respuestas del bot, pide disculpas

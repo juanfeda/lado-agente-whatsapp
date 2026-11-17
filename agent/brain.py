@@ -55,11 +55,7 @@ HERRAMIENTAS = [
             "lugar (ej: 'la de Avenida 51', 'algo cerca de la plaza', 'la que esta en "
             "170 y 15'), pasala SIEMPRE en el parametro 'query', ademas de los otros "
             "filtros que haya dado (zona, tipo, dormitorios, precio, operacion). No "
-            "inventes propiedades ni precios: si no tenes datos, usa esta herramienta. "
-            "No pongas en 'query' cosas que ya van en otro parametro (dormitorios, "
-            "ambientes, tipo, zona, precio): 'query' es solo para direcciones o referencias. "
-            "Cada resultado trae 'dormitorios', 'ambientes' y 'coincidencia'; la respuesta "
-            "trae 'total', 'exactas' y una 'nota' que tenes que respetar."
+            "inventes propiedades ni precios: si no tenes datos, usa esta herramienta."
         ),
         "input_schema": {
             "type": "object",
@@ -88,21 +84,8 @@ HERRAMIENTAS = [
                 },
                 "min_price": {"type": "number", "description": "Precio minimo en la moneda de la propiedad"},
                 "max_price": {"type": "number", "description": "Precio maximo en la moneda de la propiedad"},
-                "rooms": {
-                    "type": "integer",
-                    "description": (
-                        "Cantidad de ambientes que pide el cliente. Vuelven primero las que "
-                        "tienen exactamente esa cantidad y despues las que tienen mas."
-                    ),
-                },
-                "bedrooms": {
-                    "type": "integer",
-                    "description": (
-                        "Cantidad de dormitorios que pide el cliente. Vuelven primero las que "
-                        "tienen exactamente esa cantidad (coincidencia='exacta') y despues las "
-                        "que tienen mas. Se busca en los datos cargados y en la descripcion."
-                    ),
-                },
+                "rooms": {"type": "integer", "description": "Cantidad minima de ambientes"},
+                "bedrooms": {"type": "integer", "description": "Cantidad minima de dormitorios"},
             },
         },
     },
@@ -140,11 +123,10 @@ HERRAMIENTAS = [
         "name": "derivar_a_humano",
         "description": (
             "Llamala cuando el cliente ya esta listo para que un humano continue. "
-            "Requisito obligatorio: antes de llamarla, siempre pedile nombre, apellido "
-            "y confirmá su numero de telefono de contacto (no alcanza con que quiera "
-            "coordinar una visita o hablar con alguien — sin esos 3 datos, pedilos "
-            "primero). Tambien llamala si el cliente pidio explicitamente hablar con "
-            "alguien del equipo. Pasale un resumen breve con la propiedad de interes "
+            "Requisito obligatorio: antes de llamarla, siempre pedile nombre y apellido "
+            "(no alcanza con que quiera coordinar una visita o hablar con alguien — sin "
+            "esos 2 datos, pedilos primero). NUNCA le pidas ni confirmes un telefono: se "
+            "usa el WhatsApp desde el que escribe. Pasale un resumen breve con la propiedad de interes "
             "(si la hay) y el contexto de la consulta."
         ),
         "input_schema": {
@@ -170,7 +152,7 @@ HERRAMIENTAS = [
                 },
                 "contacto": {
                     "type": "string",
-                    "description": "Telefono o mail de contacto confirmado (si es distinto de su WhatsApp). Vacio si es el mismo WhatsApp.",
+                    "description": "Dejalo vacio. Solo completalo si el cliente ofrecio por su cuenta otro telefono o mail.",
                 },
                 "zona": {"type": "string", "description": "Zona o barrio de interes, si se menciono. Vacio si no."},
                 "tipo_propiedad": {
