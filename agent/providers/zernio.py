@@ -419,9 +419,13 @@ class ProveedorZernio(ProveedorWhatsApp):
         url = f"{self.base_url}/inbox/conversations/{conversation_id}/messages"
         try:
             async with httpx.AsyncClient(timeout=15.0) as cliente:
+                # Se piden los ultimos 100 mensajes y se revisan TODOS (no solo el primero):
+                # no dependemos de que Zernio respete el orden pedido, y detectamos tambien
+                # a quien ya habias contestado a mano mas adelante, aunque haya escrito
+                # primero el cliente.
                 r = await cliente.get(
                     url,
-                    params={"accountId": account_id, "sortOrder": "asc", "limit": 1},
+                    params={"accountId": account_id, "sortOrder": "desc", "limit": 100},
                     headers={"Authorization": f"Bearer {self.api_key}"},
                 )
         except httpx.HTTPError as e:
@@ -432,9 +436,33 @@ class ProveedorZernio(ProveedorWhatsApp):
             logger.warning(f"Zernio respondio {r.status_code} chequeando la conversacion: {r.text[:300]}")
             return False
 
-        mensajes = r.json().get("data") or r.json().get("messages") or []
+        cuerpo = r.json()
+        mensajes = cuerpo.get("data") or cuerpo.get("messages") or []
         if not mensajes:
+            logger.info(f"Chequeo de conversacion {conversation_id}: Zernio no devolvio mensajes")
             return False
 
-        primer_mensaje = mensajes[0]
-        return primer_mensaje.get("direction") == "outgoing"
+        salientes = [m for m in mensajes if m.get("direction") == "outgoing"]
+        for m in salientes:
+            origen = m.get("source") or (m.get("metadata") or {}).get("source") or ""
+            if origen == "whatsapp_business_app":
+                logger.info(
+                    f"Chequeo de conversacion {conversation_id}: hay un mensaje tuyo mandado a mano "
+                    "desde la app, el bot no responde"
+                )
+                return True
+            if not origen:
+                # Sin dato de origen: es humano si no lo registramos como mensaje del bot.
+                mid = m.get("platformMessageId") or m.get("id") or ""
+                if mid and not await es_mensaje_propio(mid):
+                    logger.info(
+                        f"Chequeo de conversacion {conversation_id}: mensaje saliente que no es del "
+                        "bot, el bot no responde"
+                    )
+                    return True
+
+        logger.info(
+            f"Chequeo de conversacion {conversation_id}: {len(mensajes)} mensajes, "
+            f"{len(salientes)} salientes, ninguno manual"
+        )
+        return False
