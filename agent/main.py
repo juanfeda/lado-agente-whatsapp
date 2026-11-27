@@ -309,7 +309,7 @@ document.getElementById('reiniciar').onclick = () => {{
 """
 
 
-VERSION_CODIGO = "2026-11-17-v7 audios; 2026-10-16-v4 bienvenida-fija / sin-presentacion / adjuntos-JuanManuel / limite-6"
+VERSION_CODIGO = "2026-11-26-v8 audios; 2026-10-16-v4 bienvenida-fija / sin-presentacion / adjuntos-JuanManuel / limite-6"
 
 
 @app.get("/")
@@ -493,6 +493,26 @@ _RE_PIDE_HUMANO = re.compile(
     r"[^.?!\n]{0,25}\b(encargad[oa]|jef[ea]|asesor(a)?|humano|persona|alguien|responsable|un agente)\b",
     re.IGNORECASE,
 )
+
+
+MENSAJE_VENDER_TASAR = "Perfecto, lo comunico con Juan Manuel. En breve te contacta."
+
+# El cliente quiere VENDER su propiedad o tasarla (no comprar ni buscar en venta).
+_RE_VENDER_TASAR = re.compile(
+    r"\b(tasar(la|lo|las|los)?|tasaci[oó]n(es)?|tasen|tasame|tasan|valuar|valuaci[oó]n|tasadores?)\b"
+    r"|\b(cu[aá]nto\s+(vale|sale|puede\s+valer)\s+(mi|nuestra|la\s+casa|el\s+depto))\b"
+    r"|\b(quiero|queremos|quisiera|quisieramos|necesito|necesitamos|pienso|pensamos|"
+    r"estoy\s+pensando\s+en|estamos\s+pensando\s+en|voy\s+a|vamos\s+a|debo|tengo\s+que|"
+    r"me\s+gustar[ií]a|nos\s+gustar[ií]a|puedo|pueden|podr[ií]an?)\s+(\w+\s+){0,2}vender(la|lo|las|los|se)?\b"
+    r"|\bvendo\s+(mi|mis|una|un|la|el|nuestra|nuestro)\b"
+    r"|\b(poner|publicar)\s+(en\s+venta|a\s+la\s+venta)\b"
+    r"|\bvender\s+(mi|mis|nuestra|nuestro|una\s+propiedad|la\s+casa|el\s+depto)\b",
+    re.IGNORECASE,
+)
+
+
+def _quiere_vender_o_tasar(texto: str) -> bool:
+    return bool(_RE_VENDER_TASAR.search(texto or ""))
 
 
 def _pide_humano(texto: str) -> bool:
@@ -702,6 +722,17 @@ async def procesar_mensaje(msg: MensajeEntrante):
                     MENSAJE_PEDIDO_HUMANO,
                 )
                 logger.info(f"{msg.telefono}: pidio hablar con una persona, se deriva a Juan Manuel")
+                return
+
+            # Quiere vender o tasar su propiedad: se comunica directo con Juan Manuel, sin
+            # pedir datos y con respuesta neutra.
+            if _quiere_vender_o_tasar(msg.texto):
+                await guardar_mensaje(msg.telefono, "user", msg.texto)
+                await _avisar_y_derivar(
+                    msg, "otro", "", f"El cliente quiere vender o tasar: {msg.texto}",
+                    MENSAJE_VENDER_TASAR,
+                )
+                logger.info(f"{msg.telefono}: quiere vender/tasar, se deriva a Juan Manuel")
                 return
 
             # Conversacion larga: tras MAX_RESPUESTAS_BOT respuestas del bot, pide disculpas
